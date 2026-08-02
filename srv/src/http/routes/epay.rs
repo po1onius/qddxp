@@ -46,25 +46,29 @@ pub fn build_payment_url(
         price_cents,
         "building epay payment url"
     );
-    let mut params = BTreeMap::new();
-    params.insert("pid", epay.pid.clone());
-    params.insert("type", payment_type.to_string());
-    params.insert("out_trade_no", epay_trade_no.to_string());
-    params.insert(
-        "notify_url",
-        format!(
-            "{}/api/payments/epay/notify",
-            trim_end_slash(&config.public_base_url)
-        ),
+    let notify_url = format!(
+        "{}/api/payments/epay/notify",
+        trim_end_slash(&config.public_base_url)
     );
-    params.insert("return_url", config.web_return_url.clone());
-    params.insert("name", product_name.to_string());
-    params.insert("money", format_money(price_cents));
-    params.insert("param", order_id.to_string());
+    let money = format_money(price_cents);
+    let order_param = order_id.to_string();
+
+    // 参数表只在当前函数内参与签名和编码，因此可以直接借用配置与请求参数。
+    // 仅为动态生成的通知地址、金额和订单参数分配字符串，避免复制商户号、返回地址等已有数据。
+    let mut params = BTreeMap::from([
+        ("pid", epay.pid.as_str()),
+        ("type", payment_type),
+        ("out_trade_no", epay_trade_no),
+        ("notify_url", notify_url.as_str()),
+        ("return_url", config.web_return_url.as_str()),
+        ("name", product_name),
+        ("money", money.as_str()),
+        ("param", order_param.as_str()),
+    ]);
 
     let sign = sign_params(&params, &epay.key);
-    params.insert("sign", sign);
-    params.insert("sign_type", EpaySignType::Md5.as_ref().to_string());
+    params.insert("sign", sign.as_str());
+    params.insert("sign_type", EpaySignType::Md5.as_ref());
 
     let submit_url = build_submit_url(&epay.gateway);
     let separator = if submit_url.contains('?') { '&' } else { '?' };
@@ -314,9 +318,9 @@ fn validate_notify(state: &AppState, notify: &EpayNotifyRequest) -> Result<(), A
 }
 
 async fn apply_notify(state: &AppState, notify: EpayNotifyRequest) -> Result<(), AppError> {
-    let epay_trade_no = non_empty(&notify.out_trade_no, "missing out_trade_no")?.to_string();
-    let notify_param = notify.param;
-    let notify_money = notify.money;
+    let epay_trade_no = non_empty(&notify.out_trade_no, "missing out_trade_no")?;
+    let notify_param = notify.param.as_deref();
+    let notify_money = notify.money.as_str();
 
     let mut conn = state.pool.get().await?;
     conn.transaction::<_, AppError, _>(async move |conn| {
@@ -351,7 +355,6 @@ async fn apply_notify(state: &AppState, notify: EpayNotifyRequest) -> Result<(),
         }
 
         let param_order_id = notify_param
-            .as_deref()
             .filter(|value| !value.trim().is_empty())
             .map(|value| {
                 Uuid::parse_str(value.trim())
@@ -369,7 +372,7 @@ async fn apply_notify(state: &AppState, notify: EpayNotifyRequest) -> Result<(),
             return Err(AppError::BadRequest("param order mismatch".to_string()));
         }
 
-        let paid_cents = money_to_cents(&notify_money).ok_or_else(|| {
+        let paid_cents = money_to_cents(notify_money).ok_or_else(|| {
             tracing::warn!(
                 order_id = %order.id,
                 money = %notify_money,
@@ -586,5 +589,66 @@ fn build_submit_url(gateway: &str) -> String {
         gateway.to_string()
     } else {
         format!("{gateway}/submit.php")
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::path::PathBuf;
+
+    use super::*;
+    use crate::config::EpayConfig;
+
+    #[test]
+    fn payment_url_contains_complete_parameters_and_valid_signature() {
+        let config = AppConfig {
+            listen_addr: "127.0.0.1:3000".parse().expect("监听地址应当有效"),
+            database_url: "postgres://example.invalid/test".to_string(),
+            public_base_url: "https://shop.example.com/".to_string(),
+            web_return_url: "https://shop.example.com/delivery".to_string(),
+            web_dist_dir: PathBuf::from("web/dist"),
+            admin_key: "test-admin-key".to_string(),
+            order_password_pepper: "test-password-pepper".to_string(),
+            epay: Some(EpayConfig {
+                gateway: "https://pay.example.com/".to_string(),
+                pid: "merchant-id".to_string(),
+                key: "merchant-secret".to_string(),
+            }),
+        };
+        let order_id =
+            Uuid::parse_str("019c2ddf-78fb-7fe0-8ed8-22577c255c83").expect("测试订单 ID 应当有效");
+
+        let payment_url =
+            build_payment_url(&config, order_id, "trade-001", "测试商品", 1_099, "alipay")
+                .expect("支付配置完整时应当生成支付地址");
+        let (submit_url, query) = payment_url
+            .split_once('?')
+            .expect("支付地址应当包含查询参数");
+        let params = query
+            .split('&')
+            .map(|pair| {
+                let (key, value) = pair.split_once('=').expect("查询参数应当包含等号");
+                let key = urlencoding::decode(key)
+                    .expect("参数名应当可以解码")
+                    .into_owned();
+                let value = urlencoding::decode(value)
+                    .expect("参数值应当可以解码")
+                    .into_owned();
+                (key, value)
+            })
+            .collect::<BTreeMap<_, _>>();
+
+        assert_eq!(submit_url, "https://pay.example.com/submit.php");
+        assert_eq!(params.get("pid").map(String::as_str), Some("merchant-id"));
+        assert_eq!(params.get("money").map(String::as_str), Some("10.99"));
+        assert_eq!(params.get("name").map(String::as_str), Some("测试商品"));
+        assert_eq!(
+            params.get("notify_url").map(String::as_str),
+            Some("https://shop.example.com/api/payments/epay/notify")
+        );
+        assert_eq!(
+            params.get("sign").map(String::as_str),
+            Some(sign_params(&params, "merchant-secret").as_str())
+        );
     }
 }

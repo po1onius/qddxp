@@ -199,7 +199,7 @@ pub async fn create_order(
     State(state): State<AppState>,
     Json(request): Json<CreateOrderRequest>,
 ) -> Result<Json<CreateOrderResponse>, AppError> {
-    let contact = request.contact.trim().to_string();
+    let contact = request.contact.trim();
     if contact.is_empty() {
         tracing::warn!(
             product_info_id = %request.product_info_id,
@@ -297,7 +297,7 @@ pub async fn create_order(
                     product_id,
                     product_info_id,
                     status: OrderStatus::Pending.as_ref(),
-                    contact: &contact,
+                    contact,
                     order_password_hash: &password_hash,
                 })
                 .get_result::<Order>(conn)
@@ -352,7 +352,7 @@ pub async fn list_orders_by_contact(
     State(state): State<AppState>,
     Json(request): Json<ListOrdersByContactRequest>,
 ) -> Result<Json<OffsetPageResponse<OrderSummaryResponse>>, AppError> {
-    let contact = request.contact.trim().to_string();
+    let contact = request.contact.trim();
     if contact.is_empty() {
         tracing::warn!("list orders by contact rejected: missing contact");
         return Err(AppError::BadRequest("contact is required".to_string()));
@@ -374,14 +374,14 @@ pub async fn list_orders_by_contact(
     let mut conn = state.pool.get().await?;
     let total = orders::table
         .inner_join(product_info::table.on(product_info::id.eq(orders::product_info_id)))
-        .filter(orders::contact.eq(contact.as_str()))
+        .filter(orders::contact.eq(contact))
         .select(count_star())
         .first::<i64>(&mut conn)
         .await?;
 
     let orders = orders::table
         .inner_join(product_info::table.on(product_info::id.eq(orders::product_info_id)))
-        .filter(orders::contact.eq(contact.as_str()))
+        .filter(orders::contact.eq(contact))
         .select((
             orders::id,
             orders::product_info_id,
