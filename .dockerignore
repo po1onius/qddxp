@@ -1,0 +1,7 @@
+.git
+deploy/.env
+srv/target
+web/dist
+web/node_modules
+**/.env
+**/.DS_Store

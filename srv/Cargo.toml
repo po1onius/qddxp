@@ -1,0 +1,26 @@
+[package]
+name = "qddxp-srv"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+axum = { version = "0.8", features = ["macros"] }
+chrono = { version = "0.4", features = ["serde"] }
+diesel = { version = "2.3", features = ["chrono", "serde_json", "uuid", "postgres"] }
+diesel-async = { version = "0.9", features = ["postgres", "bb8"] }
+diesel_migrations = "2.3"
+dotenvy = "0.15"
+hex = "0.4"
+hmac = "0.12"
+md5 = "0.7"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.10"
+strum = { version = "0.27", features = ["derive"] }
+thiserror = "2"
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "signal"] }
+tower-http = { version = "0.6", features = ["cors", "fs", "trace"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+urlencoding = "2"
+uuid = { version = "1", features = ["serde", "v4"] }

@@ -1,0 +1,5 @@
+DROP TABLE IF EXISTS api_call_logs;
+DROP TABLE IF EXISTS orders;
+DROP TABLE IF EXISTS site_settings;
+DROP TABLE IF EXISTS products;
+DROP TABLE IF EXISTS product_info;
