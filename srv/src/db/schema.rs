@@ -23,14 +23,56 @@ diesel::table! {
 
     orders (id) {
         id -> Uuid,
-        epay_trade_no -> Text,
         product_id -> Nullable<Uuid>,
         product_info_id -> Uuid,
+        product_name_snapshot -> Text,
+        amount_cents -> Int8,
+        currency -> Text,
         created_at -> Timestamptz,
+        expires_at -> Timestamptz,
         paid_at -> Nullable<Timestamptz>,
         status -> Text,
         contact -> Text,
         order_password_hash -> Text,
+    }
+}
+
+diesel::table! {
+    use diesel::sql_types::*;
+    use diesel::sql_types::Timestamptz;
+
+    payment_attempts (id) {
+        id -> Uuid,
+        order_id -> Uuid,
+        provider -> Text,
+        channel -> Text,
+        merchant_trade_no -> Text,
+        provider_transaction_id -> Nullable<Text>,
+        state -> Text,
+        code_url -> Nullable<Text>,
+        amount_cents -> Int8,
+        currency -> Text,
+        expires_at -> Timestamptz,
+        created_at -> Timestamptz,
+        updated_at -> Timestamptz,
+        paid_at -> Nullable<Timestamptz>,
+    }
+}
+
+diesel::table! {
+    use diesel::sql_types::*;
+    use diesel::sql_types::Timestamptz;
+
+    payment_events (id) {
+        id -> Uuid,
+        provider -> Text,
+        provider_event_id -> Text,
+        payment_attempt_id -> Uuid,
+        event_type -> Text,
+        request_body -> Text,
+        success -> Bool,
+        error_message -> Nullable<Text>,
+        created_at -> Timestamptz,
     }
 }
 
@@ -76,6 +118,8 @@ diesel::table! {
 diesel::allow_tables_to_appear_in_same_query!(
     api_call_logs,
     orders,
+    payment_attempts,
+    payment_events,
     product_info,
     products,
     site_settings,

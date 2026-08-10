@@ -6,6 +6,8 @@ pub enum OrderStatus {
     Pending,
     Paid,
     Preorder,
+    Expired,
+    Cancelled,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, AsRefStr, EnumString)]

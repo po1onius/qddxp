@@ -9,7 +9,7 @@
 - 创建订单（须设置 6 位以上订单密码）
 - 按订单号 + 订单密码查询订单详情
 - 按联系方式查询历史订单列表
-- 易支付（epay）网关在线支付，支付后自动分配卡密并展示
+- 易支付（epay）网关与微信支付官方 API v3 Native 在线支付，支付后自动分配卡密并展示
 
 **管理后台**（`/a-dmin`，凭 `ADMIN_KEY` 访问）
 - 商品信息（SPU）管理：价格、开关状态
@@ -27,9 +27,9 @@
 
 | 层 | 技术 |
 | --- | --- |
-| 后端 | Rust · axum · diesel (async) · PostgreSQL 16 · tower-http · tracing |
+| 后端 | Rust · axum · diesel (async) · PostgreSQL 18 · tower-http · tracing |
 | 前端 | React 18 · TypeScript · Vite · Tailwind CSS |
-| 支付 | 易支付（epay）网关，MD5 签名 |
+| 支付 | 易支付 MD5 协议；微信支付官方 API v3 Native（RSA-SHA256 / AES-256-GCM） |
 | 部署 | Docker 多阶段构建 · docker compose |
 
 后端直接托管前端构建产物（`web/dist`），前后端同源部署。
@@ -87,8 +87,41 @@ docker compose -f deploy/compose.yml up -d --build
 | `PUBLIC_BASE_URL` | 否 | 对外基础 URL，用于支付回调地址拼接 |
 | `WEB_RETURN_URL` | 否 | 支付成功后的回跳页面 |
 | `ORDER_PASSWORD_PEPPER` | 否 | 订单密码哈希 pepper，生产环境务必修改 |
+| `PAYMENT_EXPIRE_MINUTES` | 否 | 支付订单有效分钟数，默认 15，范围 1–120 |
 | `EPAY_GATEWAY` / `EPAY_PID` / `EPAY_KEY` | 否 | 三者都设置才启用易支付 |
+| `WXPAY_APP_ID` / `WXPAY_MCH_ID` | 否 | 微信支付官方直连的应用 ID 与直连商户号 |
+| `WXPAY_MERCHANT_SERIAL_NO` | 否 | 商户 API 证书序列号 |
+| `WXPAY_MERCHANT_PRIVATE_KEY_PATH` | 否 | 商户 API 私钥 PEM 文件路径 |
+| `WXPAY_API_V3_KEY` | 否 | 32 字节 APIv3 密钥，仅用于回调资源解密 |
+| `WXPAY_PUBLIC_KEY_ID` / `WXPAY_PUBLIC_KEY_PATH` | 否 | 微信支付公钥 ID 与 PEM 文件路径，用于应答和回调验签 |
 | `RUST_LOG` | 否 | 日志级别，默认 `info` |
+
+微信支付的七项 `WXPAY_*` 配置必须同时设置，否则应用会拒绝启动。生产环境的
+`PUBLIC_BASE_URL` 必须使用公网 HTTPS；回调地址固定生成为
+`/api/payments/wechatpay/notify`。Docker 部署时将两个 PEM 文件放入
+`deploy/secrets/`，该目录只读挂载且默认被 Git 忽略。
+
+### 微信支付官方直连配置
+
+本项目实现的是微信支付官方 API v3 的 Native 支付，与易支付的 `epay/wxpay`
+参数是两套独立协议。商户平台需准备已绑定商户号的 AppID、商户 API 证书序列号、
+证书对应私钥、APIv3 密钥，以及微信支付公钥 ID 和公钥文件。当前实现使用微信支付
+公钥模式验签，不接受未验签的下单应答、查单应答或支付通知。
+
+1. 将 `apiclient_key.pem` 和微信支付公钥放入 `deploy/secrets/`，文件不要提交到 Git。
+2. 在 `deploy/.env` 中完整填写七项 `WXPAY_*` 配置，并把 `PUBLIC_BASE_URL` 改为
+   可由微信服务器访问的 HTTPS 域名。
+3. 确认反向代理允许 `POST /api/payments/wechatpay/notify` 直达应用，且不会改写请求体。
+4. 重新构建并启动服务；前台支付方式列表出现“微信支付（官方）”即表示客户端初始化成功。
+
+本地联调需要自行准备 HTTPS 隧道或测试域名，并将 `PUBLIC_BASE_URL` 指向该地址；
+应用不会为开发机自动绕过 HTTPS。微信支付公钥轮换后，应同步替换公钥文件和
+`WXPAY_PUBLIC_KEY_ID`，然后滚动重启服务。
+
+- [微信支付 Native 下单](https://pay.weixin.qq.com/doc/v3/merchant/4012791877)
+- [微信支付 Native 支付通知](https://pay.weixin.qq.com/doc/v3/merchant/4012791882)
+- [微信支付 API v3 证书和密钥说明](https://pay.weixin.qq.com/doc/v3/merchant/4024350132)
+- [微信支付 API v3 官方 SDK](https://github.com/wechatpay-apiv3)
 
 ## License
 

@@ -4,7 +4,7 @@ use axum::{
     Json,
     extract::{Query, State},
 };
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, Duration, Utc};
 use diesel::{dsl::count_star, prelude::*};
 use diesel_async::{AsyncConnection, RunQueryDsl};
 use serde::{Deserialize, Serialize};
@@ -14,11 +14,14 @@ use super::epay;
 use crate::{
     AppState,
     db::{
-        models::{NewOrder, Order, ProductInfo},
-        schema::{orders, product_info, products},
+        models::{NewOrder, NewPaymentAttempt, Order, PaymentAttempt, ProductInfo},
+        schema::{orders, payment_attempts, product_info, products},
         settings::load_order_allocation_mode,
     },
-    domain::{OrderAllocationMode, OrderStatus, PaymentType, ProductStatus},
+    domain::{
+        OrderAllocationMode, OrderStatus, PaymentAttemptState, PaymentChannel, PaymentProvider,
+        ProductStatus, validate_payment_method,
+    },
     error::AppError,
     http::pagination::{OffsetPageResponse, OffsetPagination, normalize_offset_page},
     security::{hash_order_password, verify_order_password},
@@ -40,14 +43,41 @@ pub struct CreateOrderRequest {
     pub product_info_id: Uuid,
     pub contact: String,
     pub order_password: String,
-    pub payment_type: Option<String>,
+    pub payment: PaymentSelectionRequest,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct PaymentSelectionRequest {
+    pub provider: String,
+    pub channel: String,
 }
 
 #[derive(Debug, Serialize)]
 pub struct CreateOrderResponse {
     pub id: Uuid,
     pub status: String,
-    pub payment_url: Option<String>,
+    pub payment_action: Option<PaymentAction>,
+    pub payment_error: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum PaymentAction {
+    Redirect {
+        url: String,
+    },
+    QrCode {
+        content: String,
+        expires_at: DateTime<Utc>,
+    },
+}
+
+#[derive(Debug, Serialize)]
+pub struct PaymentMethodResponse {
+    pub provider: String,
+    pub channel: String,
+    pub label: String,
+    pub action_type: String,
 }
 
 #[derive(Debug, Serialize)]
@@ -156,6 +186,39 @@ pub async fn get_order_allocation_mode(
     }))
 }
 
+pub async fn list_payment_methods(
+    State(state): State<AppState>,
+) -> Json<Vec<PaymentMethodResponse>> {
+    let mut methods = Vec::new();
+    if state.config.epay.is_some() {
+        methods.push(PaymentMethodResponse {
+            provider: PaymentProvider::Epay.as_ref().to_string(),
+            channel: PaymentChannel::Alipay.as_ref().to_string(),
+            label: "支付宝（易支付）".to_string(),
+            action_type: "redirect".to_string(),
+        });
+        methods.push(PaymentMethodResponse {
+            provider: PaymentProvider::Epay.as_ref().to_string(),
+            channel: PaymentChannel::Wxpay.as_ref().to_string(),
+            label: "微信（易支付）".to_string(),
+            action_type: "redirect".to_string(),
+        });
+    }
+    if state.wechatpay.is_some() {
+        methods.push(PaymentMethodResponse {
+            provider: PaymentProvider::Wechatpay.as_ref().to_string(),
+            channel: PaymentChannel::Native.as_ref().to_string(),
+            label: "微信支付（官方）".to_string(),
+            action_type: "qr_code".to_string(),
+        });
+    }
+    tracing::info!(
+        returned = methods.len(),
+        "listed configured payment methods"
+    );
+    Json(methods)
+}
+
 async fn available_stock_counts(
     conn: &mut diesel_async::AsyncPgConnection,
     product_info_ids: &[Uuid],
@@ -219,19 +282,41 @@ pub async fn create_order(
         ));
     }
 
-    let payment_type = request
-        .payment_type
-        .as_deref()
-        .unwrap_or(PaymentType::Alipay.as_ref())
-        .parse::<PaymentType>()
-        .map_err(|_| AppError::BadRequest("unsupported payment_type".to_string()))?;
+    let payment_provider = request
+        .payment
+        .provider
+        .trim()
+        .parse::<PaymentProvider>()
+        .map_err(|_| AppError::BadRequest("unsupported payment provider".to_string()))?;
+    let payment_channel = request
+        .payment
+        .channel
+        .trim()
+        .parse::<PaymentChannel>()
+        .map_err(|_| AppError::BadRequest("unsupported payment channel".to_string()))?;
+    if !validate_payment_method(payment_provider, payment_channel) {
+        return Err(AppError::BadRequest(
+            "unsupported payment provider/channel combination".to_string(),
+        ));
+    }
+    let provider_configured = match payment_provider {
+        PaymentProvider::Epay => state.config.epay.is_some(),
+        PaymentProvider::Wechatpay => state.wechatpay.is_some(),
+    };
+    if !provider_configured {
+        return Err(AppError::BadRequest(
+            "selected payment provider is not configured".to_string(),
+        ));
+    }
 
     let password_hash =
         hash_order_password(&request.order_password, &state.config.order_password_pepper)?;
     let product_info_id = request.product_info_id;
+    let payment_expire_minutes = state.config.payment_expire_minutes;
     tracing::info!(
         %product_info_id,
-        payment_type = payment_type.as_ref(),
+        payment_provider = payment_provider.as_ref(),
+        payment_channel = payment_channel.as_ref(),
         contact_len = contact.chars().count(),
         "creating order"
     );
@@ -289,18 +374,38 @@ pub async fn create_order(
             };
 
             let order_id = Uuid::new_v4();
-            let epay_trade_no = epay::build_trade_no(order_id);
+            let payment_attempt_id = Uuid::new_v4();
+            // UUID 去掉连字符后恰好为 32 个合法字符，满足微信支付商户订单号限制。
+            let merchant_trade_no = payment_attempt_id.simple().to_string();
+            let expires_at = Utc::now() + Duration::minutes(payment_expire_minutes);
             let order = diesel::insert_into(orders::table)
                 .values(&NewOrder {
                     id: order_id,
-                    epay_trade_no: &epay_trade_no,
                     product_id,
                     product_info_id,
+                    product_name_snapshot: &product_name,
+                    amount_cents: product_price_cents,
+                    currency: "CNY",
+                    expires_at,
                     status: OrderStatus::Pending.as_ref(),
                     contact,
                     order_password_hash: &password_hash,
                 })
                 .get_result::<Order>(conn)
+                .await?;
+            let payment_attempt: PaymentAttempt = diesel::insert_into(payment_attempts::table)
+                .values(&NewPaymentAttempt {
+                    id: payment_attempt_id,
+                    order_id,
+                    provider: payment_provider.as_ref(),
+                    channel: payment_channel.as_ref(),
+                    merchant_trade_no: &merchant_trade_no,
+                    state: PaymentAttemptState::Created.as_ref(),
+                    amount_cents: product_price_cents,
+                    currency: "CNY",
+                    expires_at,
+                })
+                .get_result(conn)
                 .await?;
             tracing::info!(
                 order_id = %order.id,
@@ -311,10 +416,10 @@ pub async fn create_order(
                 "pending order created"
             );
 
-            Ok((order, product_name, product_price_cents))
+            Ok((order, payment_attempt))
         })
         .await;
-    let (order, product_name, product_price_cents) = match transaction_result {
+    let (order, payment_attempt) = match transaction_result {
         Ok(value) => value,
         Err(error) => {
             tracing::warn!(
@@ -326,25 +431,93 @@ pub async fn create_order(
         }
     };
 
-    let payment_url = epay::build_payment_url(
-        state.config.as_ref(),
-        order.id,
-        &order.epay_trade_no,
-        &product_name,
-        product_price_cents,
-        payment_type.as_ref(),
-    );
+    let (payment_action, payment_error) = match payment_provider {
+        PaymentProvider::Epay => {
+            let payment_url = epay::build_payment_url(
+                state.config.as_ref(),
+                order.id,
+                &payment_attempt.merchant_trade_no,
+                &order.product_name_snapshot,
+                order.amount_cents,
+                payment_channel.as_ref(),
+            );
+            (payment_url.map(|url| PaymentAction::Redirect { url }), None)
+        }
+        PaymentProvider::Wechatpay => {
+            let client = state
+                .wechatpay
+                .as_ref()
+                .expect("provider configuration checked before order transaction");
+            match client
+                .native_prepay(
+                    &order.product_name_snapshot,
+                    &payment_attempt.merchant_trade_no,
+                    order.id,
+                    order.amount_cents,
+                    payment_attempt.expires_at,
+                )
+                .await
+            {
+                Ok(prepay) => {
+                    let mut conn = state.pool.get().await?;
+                    diesel::update(
+                        payment_attempts::table.filter(payment_attempts::id.eq(payment_attempt.id)),
+                    )
+                    .set((
+                        payment_attempts::state.eq(PaymentAttemptState::PrepayCreated.as_ref()),
+                        payment_attempts::code_url.eq(Some(prepay.code_url.as_str())),
+                        payment_attempts::updated_at.eq(Utc::now()),
+                    ))
+                    .execute(&mut conn)
+                    .await?;
+                    (
+                        Some(PaymentAction::QrCode {
+                            content: prepay.code_url,
+                            expires_at: payment_attempt.expires_at,
+                        }),
+                        None,
+                    )
+                }
+                Err(error) => {
+                    tracing::error!(
+                        order_id = %order.id,
+                        payment_attempt_id = %payment_attempt.id,
+                        error = ?error,
+                        "official WeChat Pay Native prepay failed"
+                    );
+                    let mut conn = state.pool.get().await?;
+                    diesel::update(
+                        payment_attempts::table.filter(payment_attempts::id.eq(payment_attempt.id)),
+                    )
+                    .set((
+                        payment_attempts::state.eq(PaymentAttemptState::Failed.as_ref()),
+                        payment_attempts::updated_at.eq(Utc::now()),
+                    ))
+                    .execute(&mut conn)
+                    .await?;
+                    (
+                        None,
+                        Some(
+                            "微信支付下单失败，请稍后重新下单；当前订单到期后会自动释放库存"
+                                .to_string(),
+                        ),
+                    )
+                }
+            }
+        }
+    };
     tracing::info!(
         order_id = %order.id,
         %product_info_id,
-        payment_url_generated = payment_url.is_some(),
+        payment_action_generated = payment_action.is_some(),
         "create order completed"
     );
 
     Ok(Json(CreateOrderResponse {
         id: order.id,
         status: order.status,
-        payment_url,
+        payment_action,
+        payment_error,
     }))
 }
 
@@ -373,20 +546,18 @@ pub async fn list_orders_by_contact(
 
     let mut conn = state.pool.get().await?;
     let total = orders::table
-        .inner_join(product_info::table.on(product_info::id.eq(orders::product_info_id)))
         .filter(orders::contact.eq(contact))
         .select(count_star())
         .first::<i64>(&mut conn)
         .await?;
 
     let orders = orders::table
-        .inner_join(product_info::table.on(product_info::id.eq(orders::product_info_id)))
         .filter(orders::contact.eq(contact))
         .select((
             orders::id,
             orders::product_info_id,
-            product_info::name,
-            product_info::price_cents,
+            orders::product_name_snapshot,
+            orders::amount_cents,
             orders::status,
             orders::created_at,
         ))
@@ -444,12 +615,6 @@ pub async fn query_order(
         return Err(AppError::Unauthorized);
     }
 
-    let product_name = product_info::table
-        .filter(product_info::id.eq(order.product_info_id))
-        .select(product_info::name)
-        .first::<String>(&mut conn)
-        .await?;
-
     let content = match (order.status == OrderStatus::Paid.as_ref(), order.product_id) {
         (true, Some(product_id)) => products::table
             .filter(products::id.eq(product_id))
@@ -463,7 +628,7 @@ pub async fn query_order(
     let response = OrderDetailResponse {
         id: order.id,
         product_info_id: order.product_info_id,
-        product_name,
+        product_name: order.product_name_snapshot,
         status: order.status,
         contact: order.contact,
         created_at: order.created_at,

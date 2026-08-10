@@ -1,6 +1,7 @@
 pub mod admin;
 pub mod epay;
 pub mod public;
+pub mod wechatpay;
 
 use axum::{
     Json, Router,
@@ -23,6 +24,7 @@ pub fn router(state: AppState) -> Router {
 
     let api = Router::new()
         .route("/products", get(public::list_products))
+        .route("/payment-methods", get(public::list_payment_methods))
         .route(
             "/order-allocation-mode",
             get(public::get_order_allocation_mode),
@@ -33,6 +35,11 @@ pub fn router(state: AppState) -> Router {
         .route(
             "/payments/epay/notify",
             get(epay::notify_query).post(epay::notify_form),
+        )
+        .route("/payments/wechatpay/notify", post(wechatpay::notify))
+        .route(
+            "/orders/{id}/payments/wechatpay/query",
+            post(wechatpay::reconcile_order),
         )
         .route(
             "/admin/product-info",

@@ -1,10 +1,33 @@
 use strum::{AsRefStr, EnumString};
 
+/// 支付提供方。`Epay` 与微信支付官方直连是两套完全独立的协议，禁止混用配置和回调。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, AsRefStr, EnumString)]
 #[strum(serialize_all = "snake_case")]
-pub enum PaymentType {
+pub enum PaymentProvider {
+    Epay,
+    Wechatpay,
+}
+
+/// 支付渠道。渠道必须与提供方组合校验，例如 `epay/wxpay` 与
+/// `wechatpay/native` 虽然最终都使用微信客户端付款，但协议层完全不同。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, AsRefStr, EnumString)]
+#[strum(serialize_all = "snake_case")]
+pub enum PaymentChannel {
     Alipay,
     Wxpay,
+    Native,
+    /// 迁移旧版 ePay 订单时使用；不允许客户端选择。
+    Legacy,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, AsRefStr, EnumString)]
+#[strum(serialize_all = "snake_case")]
+pub enum PaymentAttemptState {
+    Created,
+    PrepayCreated,
+    Succeeded,
+    Failed,
+    Closed,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, AsRefStr)]
@@ -16,7 +39,8 @@ pub enum EpaySignType {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, AsRefStr)]
 #[strum(serialize_all = "snake_case")]
 pub enum ApiName {
-    NotifyUrl,
+    EpayNotify,
+    WechatpayNotify,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, AsRefStr)]
@@ -25,4 +49,14 @@ pub enum HttpMethod {
     Get,
     #[strum(serialize = "POST")]
     Post,
+}
+
+/// 校验提供方与渠道组合，避免把易支付的 `wxpay` 参数误认为微信官方协议。
+pub fn validate_payment_method(provider: PaymentProvider, channel: PaymentChannel) -> bool {
+    matches!(
+        (provider, channel),
+        (PaymentProvider::Epay, PaymentChannel::Alipay)
+            | (PaymentProvider::Epay, PaymentChannel::Wxpay)
+            | (PaymentProvider::Wechatpay, PaymentChannel::Native)
+    )
 }

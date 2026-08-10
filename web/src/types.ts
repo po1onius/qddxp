@@ -94,13 +94,31 @@ export type CreateOrderInput = {
   product_info_id: string;
   contact: string;
   order_password: string;
-  payment_type: 'alipay' | 'wxpay';
+  payment: PaymentSelection;
 };
+
+export type PaymentProvider = 'epay' | 'wechatpay';
+export type PaymentChannel = 'alipay' | 'wxpay' | 'native';
+
+export type PaymentSelection = {
+  provider: PaymentProvider;
+  channel: PaymentChannel;
+};
+
+export type PaymentMethod = PaymentSelection & {
+  label: string;
+  action_type: 'redirect' | 'qr_code';
+};
+
+export type PaymentAction =
+  | { type: 'redirect'; url: string }
+  | { type: 'qr_code'; content: string; expires_at: string };
 
 export type CreateOrderResult = {
   id: string;
   status: OrderStatus;
-  payment_url: string | null;
+  payment_action: PaymentAction | null;
+  payment_error: string | null;
 };
 
 export type QueryOrderInput = {
@@ -114,7 +132,12 @@ export type ListOrdersByContactInput = {
   page_size?: number;
 };
 
-export type OrderStatus = 'pending' | 'paid' | 'preorder';
+export type OrderStatus = 'pending' | 'paid' | 'preorder' | 'expired' | 'cancelled';
+
+export type ReconcilePaymentResult = {
+  status: OrderStatus;
+  trade_state: string;
+};
 
 export type OrderSummary = {
   id: string;
@@ -145,6 +168,13 @@ export type AdminOrder = {
   paid_at: string | null;
   status: OrderStatus | string;
   contact: string;
+  payment_provider: string;
+  payment_channel: string;
+  merchant_trade_no: string;
+  provider_transaction_id: string | null;
+  payment_state: string;
+  amount_cents: number;
+  currency: string;
 };
 
 export type AdminApiCallLog = {

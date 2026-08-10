@@ -9,8 +9,7 @@ use axum::{
     response::{IntoResponse, Response},
 };
 use chrono::Utc;
-use diesel::prelude::*;
-use diesel_async::{AsyncConnection, RunQueryDsl};
+use diesel_async::RunQueryDsl;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use uuid::Uuid;
@@ -18,12 +17,10 @@ use uuid::Uuid;
 use crate::{
     AppState,
     config::AppConfig,
-    db::{
-        models::{NewApiCallLog, Order},
-        schema::{api_call_logs, orders, product_info, products},
-    },
-    domain::{ApiName, EpaySignType, HttpMethod, OrderStatus, ProductStatus},
+    db::{models::NewApiCallLog, schema::api_call_logs},
+    domain::{ApiName, EpaySignType, HttpMethod, PaymentProvider},
     error::AppError,
+    payments::service::{PaymentConfirmation, confirm_payment},
 };
 
 const EPAY_TRADE_SUCCESS: &str = "TRADE_SUCCESS";
@@ -84,11 +81,6 @@ pub fn build_payment_url(
         separator,
         encode_query(&params)
     ))
-}
-
-pub fn build_trade_no(order_id: Uuid) -> String {
-    let suffix = order_id.as_u128() % 1_000_000_000_000_000_000u128;
-    format!("{}{:018}", Utc::now().timestamp_millis(), suffix)
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -166,15 +158,20 @@ async fn notify_response(
     let (success, response_body, error_message) = match validation_result {
         Ok(()) => {
             if notify.trade_status == EPAY_TRADE_SUCCESS {
-                let apply_result = apply_notify(&state, notify).await;
-                let error_message = apply_result.as_ref().err().map(|error| {
-                    tracing::warn!(
-                        error = ?error,
-                        "trusted epay notify accepted but business apply failed"
-                    );
-                    format!("business apply failed: {error}")
-                });
-                (true, EPAY_NOTIFY_SUCCESS, error_message)
+                match apply_notify(&state, notify).await {
+                    Ok(()) => (true, EPAY_NOTIFY_SUCCESS, None),
+                    Err(error) => {
+                        tracing::error!(
+                            error = ?error,
+                            "trusted epay notify business apply failed; gateway retry requested"
+                        );
+                        (
+                            false,
+                            EPAY_NOTIFY_FAIL,
+                            Some(format!("business apply failed: {error}")),
+                        )
+                    }
+                }
             } else {
                 tracing::info!(
                     out_trade_no = %notify.out_trade_no,
@@ -252,7 +249,7 @@ async fn record_notify_call(
     diesel::insert_into(api_call_logs::table)
         .values(&NewApiCallLog {
             id: Uuid::new_v4(),
-            api_name: ApiName::NotifyUrl.as_ref(),
+            api_name: ApiName::EpayNotify.as_ref(),
             http_method: http_method.as_ref(),
             path: "/api/payments/epay/notify",
             request_params: &request_params,
@@ -318,191 +315,37 @@ fn validate_notify(state: &AppState, notify: &EpayNotifyRequest) -> Result<(), A
 }
 
 async fn apply_notify(state: &AppState, notify: EpayNotifyRequest) -> Result<(), AppError> {
-    let epay_trade_no = non_empty(&notify.out_trade_no, "missing out_trade_no")?;
-    let notify_param = notify.param.as_deref();
-    let notify_money = notify.money.as_str();
+    let merchant_trade_no = non_empty(&notify.out_trade_no, "missing out_trade_no")?;
+    let expected_order_id = notify
+        .param
+        .as_deref()
+        .filter(|value| !value.trim().is_empty())
+        .map(|value| {
+            Uuid::parse_str(value.trim())
+                .map_err(|_| AppError::BadRequest("invalid param order id".to_string()))
+        })
+        .transpose()?;
+    let paid_cents = money_to_cents(&notify.money)
+        .ok_or_else(|| AppError::BadRequest("invalid money".to_string()))?;
+    let provider_event_id = format!("notify:{}", notify.trade_no);
+    let request_body = serde_json::to_string(&notify)
+        .map_err(|error| AppError::BadRequest(format!("invalid epay notify: {error}")))?;
 
-    let mut conn = state.pool.get().await?;
-    conn.transaction::<_, AppError, _>(async move |conn| {
-        tracing::debug!(
-            epay_trade_no = %epay_trade_no,
-            "locking order for epay notify"
-        );
-        let order = orders::table
-            .filter(orders::epay_trade_no.eq(epay_trade_no))
-            .for_update()
-            .first::<Order>(conn)
-            .await
-            .optional()?
-            .ok_or_else(|| AppError::NotFound("order not found".to_string()))?;
-        tracing::info!(
-            order_id = %order.id,
-            product_id = ?order.product_id,
-            product_info_id = %order.product_info_id,
-            status = %order.status,
-            "order locked for epay notify"
-        );
-
-        if order.status == OrderStatus::Paid.as_ref()
-            || order.status == OrderStatus::Preorder.as_ref()
-        {
-            tracing::info!(
-                order_id = %order.id,
-                status = %order.status,
-                "epay notify ignored: order payment already applied"
-            );
-            return Ok(());
-        }
-
-        let param_order_id = notify_param
-            .filter(|value| !value.trim().is_empty())
-            .map(|value| {
-                Uuid::parse_str(value.trim())
-                    .map_err(|_| AppError::BadRequest("invalid param order id".to_string()))
-            })
-            .transpose()?;
-        if let Some(param_order_id) = param_order_id
-            && param_order_id != order.id
-        {
-            tracing::warn!(
-                order_id = %order.id,
-                param_order_id = %param_order_id,
-                "epay notify rejected: param order mismatch"
-            );
-            return Err(AppError::BadRequest("param order mismatch".to_string()));
-        }
-
-        let paid_cents = money_to_cents(notify_money).ok_or_else(|| {
-            tracing::warn!(
-                order_id = %order.id,
-                money = %notify_money,
-                "epay notify rejected: invalid money"
-            );
-            AppError::BadRequest("invalid money".to_string())
-        })?;
-
-        let price_cents = product_info::table
-            .filter(product_info::id.eq(order.product_info_id))
-            .select(product_info::price_cents)
-            .first::<i64>(conn)
-            .await?;
-
-        if paid_cents != price_cents {
-            tracing::warn!(
-                order_id = %order.id,
-                paid_cents,
-                price_cents,
-                "epay notify rejected: payment amount mismatch"
-            );
-            return Err(AppError::BadRequest("payment amount mismatch".to_string()));
-        }
-
-        let now = Utc::now();
-        let reserved_product = if let Some(product_id) = order.product_id {
-            products::table
-                .select((products::id, products::status))
-                .filter(products::id.eq(product_id))
-                .filter(products::product_info_id.eq(order.product_info_id))
-                .for_update()
-                .first::<(Uuid, String)>(conn)
-                .await
-                .optional()?
-        } else {
-            None
-        };
-
-        if let Some((product_id, product_status)) = reserved_product {
-            if product_status != ProductStatus::Reserved.as_ref() {
-                tracing::warn!(
-                    order_id = %order.id,
-                    product_id = %product_id,
-                    product_info_id = %order.product_info_id,
-                    product_status,
-                    "epay notify rejected: reserved inventory status mismatch"
-                );
-                return Err(AppError::Conflict(
-                    "reserved product is not available".to_string(),
-                ));
-            }
-
-            diesel::update(orders::table.filter(orders::id.eq(order.id)))
-                .set((
-                    orders::status.eq(OrderStatus::Paid.as_ref()),
-                    orders::paid_at.eq(now),
-                ))
-                .execute(conn)
-                .await?;
-
-            diesel::update(products::table.filter(products::id.eq(product_id)))
-                .set(products::status.eq(ProductStatus::Delivered.as_ref()))
-                .execute(conn)
-                .await?;
-            tracing::info!(
-                order_id = %order.id,
-                product_id = %product_id,
-                product_info_id = %order.product_info_id,
-                "reserved inventory delivered for paid order"
-            );
-        } else {
-            let allocated_product_id = products::table
-                .select(products::id)
-                .filter(products::product_info_id.eq(order.product_info_id))
-                .filter(products::status.eq(ProductStatus::Available.as_ref()))
-                .for_update()
-                .skip_locked()
-                .first::<Uuid>(conn)
-                .await
-                .optional()?;
-
-            if let Some(product_id) = allocated_product_id {
-                diesel::update(orders::table.filter(orders::id.eq(order.id)))
-                    .set((
-                        orders::status.eq(OrderStatus::Paid.as_ref()),
-                        orders::paid_at.eq(now),
-                        orders::product_id.eq(Some(product_id)),
-                    ))
-                    .execute(conn)
-                    .await?;
-
-                diesel::update(products::table.filter(products::id.eq(product_id)))
-                    .set(products::status.eq(ProductStatus::Delivered.as_ref()))
-                    .execute(conn)
-                    .await?;
-                tracing::info!(
-                    order_id = %order.id,
-                    product_id = %product_id,
-                    product_info_id = %order.product_info_id,
-                    "available inventory allocated and delivered for paid order"
-                );
-            } else {
-                let preorder_product_id = Uuid::new_v4();
-                diesel::update(orders::table.filter(orders::id.eq(order.id)))
-                    .set((
-                        orders::status.eq(OrderStatus::Preorder.as_ref()),
-                        orders::paid_at.eq(now),
-                        orders::product_id.eq(Some(preorder_product_id)),
-                    ))
-                    .execute(conn)
-                    .await?;
-                tracing::info!(
-                    order_id = %order.id,
-                    product_id = %preorder_product_id,
-                    product_info_id = %order.product_info_id,
-                    "paid order moved to preorder due to missing inventory"
-                );
-            }
-        }
-
-        tracing::info!(
-            order_id = %order.id,
-            product_id = ?order.product_id,
-            product_info_id = %order.product_info_id,
-            paid_cents,
-            "epay notify applied"
-        );
-
-        Ok(())
-    })
+    confirm_payment(
+        &state.pool,
+        PaymentConfirmation {
+            provider: PaymentProvider::Epay.as_ref(),
+            provider_event_id: &provider_event_id,
+            event_type: EPAY_TRADE_SUCCESS,
+            merchant_trade_no,
+            provider_transaction_id: &notify.trade_no,
+            expected_order_id,
+            amount_cents: paid_cents,
+            currency: "CNY",
+            paid_at: Utc::now(),
+            request_body: &request_body,
+        },
+    )
     .await?;
     Ok(())
 }
@@ -609,11 +452,13 @@ mod tests {
             web_dist_dir: PathBuf::from("web/dist"),
             admin_key: "test-admin-key".to_string(),
             order_password_pepper: "test-password-pepper".to_string(),
+            payment_expire_minutes: 15,
             epay: Some(EpayConfig {
                 gateway: "https://pay.example.com/".to_string(),
                 pid: "merchant-id".to_string(),
                 key: "merchant-secret".to_string(),
             }),
+            wechatpay: None,
         };
         let order_id =
             Uuid::parse_str("019c2ddf-78fb-7fe0-8ed8-22577c255c83").expect("测试订单 ID 应当有效");

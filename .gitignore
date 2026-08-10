@@ -9,3 +9,5 @@ dist/
 *.local
 .idea/
 .vscode/
+deploy/secrets/*
+!deploy/secrets/.gitkeep

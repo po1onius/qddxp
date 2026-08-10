@@ -1,10 +1,19 @@
 import { useEffect, useMemo, useState } from 'react';
 import type { FormEvent, ReactNode } from 'react';
 import { CheckCircle2, ChevronLeft, ChevronRight, ClipboardCheck, CreditCard, RefreshCcw, Search, X } from 'lucide-react';
+import QRCode from 'qrcode';
 import { AdminApp } from './AdminApp';
 import { useToast } from './Toast';
-import { createOrder, getOrderAllocationMode, listOrdersByContact, listProductPage, queryOrder } from './api/client';
-import type { CreateOrderResult, OrderAllocationMode, OrderDetail, OrderSummary, Product } from './types';
+import {
+  createOrder,
+  getOrderAllocationMode,
+  listOrdersByContact,
+  listPaymentMethods,
+  listProductPage,
+  queryOrder,
+  reconcileWechatPayOrder,
+} from './api/client';
+import type { CreateOrderResult, OrderAllocationMode, OrderDetail, OrderSummary, PaymentMethod, Product } from './types';
 
 type View = 'catalog' | 'checkout' | 'delivery';
 type PaymentReturnState =
@@ -106,6 +115,7 @@ function ShopApp() {
   const [selectedProduct, setSelectedProduct] = useState<Product | null>(null);
   const [detailsProduct, setDetailsProduct] = useState<Product | null>(null);
   const [orderAllocationMode, setOrderAllocationMode] = useState<OrderAllocationMode>('reserve_on_create');
+  const [paymentMethods, setPaymentMethods] = useState<PaymentMethod[]>([]);
   const [loadingProducts, setLoadingProducts] = useState(true);
 
   useEffect(() => {
@@ -125,7 +135,19 @@ function ShopApp() {
   }
 
   async function refreshProducts() {
-    await Promise.all([refreshOrderAllocationMode(), loadProductPage(productPage)]);
+    await Promise.all([refreshOrderAllocationMode(), refreshPaymentMethods(), loadProductPage(productPage)]);
+  }
+
+  async function refreshPaymentMethods() {
+    try {
+      setPaymentMethods(await listPaymentMethods());
+    } catch (error) {
+      setPaymentMethods([]);
+      showToast({
+        message: error instanceof Error ? error.message : '支付方式加载失败',
+        type: 'error',
+      });
+    }
   }
 
   async function loadProductPage(page: number) {
@@ -187,12 +209,13 @@ function ShopApp() {
           )}
           {view === 'checkout' && (
             <CheckoutPage
+              paymentMethods={paymentMethods}
               product={selectedProduct}
               onBack={() => setView('catalog')}
               onCreated={(order) => {
                 sessionStorage.setItem(LAST_ORDER_ID_STORAGE, order.id);
-                if (order.payment_url) {
-                  window.location.href = order.payment_url;
+                if (order.payment_action?.type === 'redirect') {
+                  window.location.href = order.payment_action.url;
                   return;
                 }
                 setView('delivery');
@@ -458,21 +481,95 @@ function ProductDetailsBlock({ product }: { product: Product }) {
 function CheckoutPage({
   onBack,
   onCreated,
+  paymentMethods,
   product,
 }: {
   onBack: () => void;
   onCreated: (order: CreateOrderResult) => void;
+  paymentMethods: PaymentMethod[];
   product: Product | null;
 }) {
   const { showToast } = useToast();
   const [contact, setContact] = useState('');
   const [orderPassword, setOrderPassword] = useState('');
-  const [paymentType, setPaymentType] = useState<'alipay' | 'wxpay'>('alipay');
+  const [selectedPayment, setSelectedPayment] = useState<PaymentMethod | null>(null);
   const [submitting, setSubmitting] = useState(false);
+  const [qrOrder, setQrOrder] = useState<CreateOrderResult | null>(null);
+  const [qrImage, setQrImage] = useState('');
+  const [remainingSeconds, setRemainingSeconds] = useState(0);
+  const [reconciling, setReconciling] = useState(false);
+
+  useEffect(() => {
+    if (!selectedPayment && paymentMethods.length > 0) {
+      setSelectedPayment(paymentMethods[0]);
+    } else if (
+      selectedPayment &&
+      !paymentMethods.some(
+        (method) => method.provider === selectedPayment.provider && method.channel === selectedPayment.channel,
+      )
+    ) {
+      setSelectedPayment(paymentMethods[0] ?? null);
+    }
+  }, [paymentMethods, selectedPayment]);
+
+  useEffect(() => {
+    const action = qrOrder?.payment_action;
+    if (!qrOrder || action?.type !== 'qr_code') {
+      setQrImage('');
+      setRemainingSeconds(0);
+      return;
+    }
+
+    let stopped = false;
+    void QRCode.toDataURL(action.content, {
+      errorCorrectionLevel: 'M',
+      margin: 2,
+      width: 280,
+    })
+      .then((image) => {
+        if (!stopped) {
+          setQrImage(image);
+        }
+      })
+      .catch(() => {
+        if (!stopped) {
+          showToast({ message: '支付二维码生成失败', type: 'error' });
+        }
+      });
+
+    const updateRemaining = () => {
+      const seconds = Math.max(0, Math.ceil((new Date(action.expires_at).getTime() - Date.now()) / 1000));
+      setRemainingSeconds(seconds);
+    };
+    updateRemaining();
+    const countdown = window.setInterval(updateRemaining, 1000);
+    const poll = window.setInterval(async () => {
+      try {
+        const detail = await queryOrder({ id: qrOrder.id, order_password: orderPassword });
+        if (!stopped && (detail.status === 'paid' || detail.status === 'preorder')) {
+          stopped = true;
+          showToast({ message: '微信支付已确认，正在进入订单详情', type: 'success' });
+          onCreated(qrOrder);
+        }
+      } catch {
+        // 轮询失败通常是瞬时网络问题；保留二维码并等待下一轮，不用连续打扰用户。
+      }
+    }, 2500);
+
+    return () => {
+      stopped = true;
+      window.clearInterval(countdown);
+      window.clearInterval(poll);
+    };
+  }, [onCreated, orderPassword, qrOrder, showToast]);
 
   async function submit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     if (!product) {
+      return;
+    }
+    if (!selectedPayment) {
+      showToast({ message: '当前没有可用的支付方式', type: 'error' });
       return;
     }
 
@@ -483,10 +580,21 @@ function CheckoutPage({
         product_info_id: product.id,
         contact,
         order_password: orderPassword,
-        payment_type: paymentType,
+        payment: {
+          provider: selectedPayment.provider,
+          channel: selectedPayment.channel,
+        },
       });
       sessionStorage.setItem(LAST_CONTACT_STORAGE, contact.trim());
-      onCreated(order);
+      sessionStorage.setItem(LAST_ORDER_ID_STORAGE, order.id);
+      if (order.payment_error) {
+        showToast({ message: order.payment_error, type: 'error' });
+      }
+      if (order.payment_action?.type === 'qr_code') {
+        setQrOrder(order);
+      } else {
+        onCreated(order);
+      }
     } catch (err) {
       showToast({
         message: err instanceof Error ? err.message : '创建订单失败',
@@ -494,6 +602,29 @@ function CheckoutPage({
       });
     } finally {
       setSubmitting(false);
+    }
+  }
+
+  async function reconcilePayment() {
+    if (!qrOrder) {
+      return;
+    }
+    setReconciling(true);
+    try {
+      const result = await reconcileWechatPayOrder(qrOrder.id, orderPassword);
+      if (result.status === 'paid' || result.status === 'preorder') {
+        showToast({ message: '微信支付已确认', type: 'success' });
+        onCreated(qrOrder);
+      } else {
+        showToast({ message: `微信支付状态：${result.trade_state}`, type: 'info' });
+      }
+    } catch (error) {
+      showToast({
+        message: error instanceof Error ? error.message : '微信支付查单失败',
+        type: 'error',
+      });
+    } finally {
+      setReconciling(false);
     }
   }
 
@@ -555,19 +686,22 @@ function CheckoutPage({
       <fieldset>
         <legend className="text-sm font-medium text-slate-700">支付方式</legend>
         <div className="mt-2 grid grid-cols-2 gap-2">
-          {(['alipay', 'wxpay'] as const).map((type) => (
+          {paymentMethods.map((method) => (
             <button
               className={`h-10 rounded-md border px-3 text-sm font-medium ${
-                paymentType === type ? 'border-slate-950 bg-slate-950 text-white' : 'border-slate-300 bg-white text-slate-700'
+                selectedPayment?.provider === method.provider && selectedPayment.channel === method.channel
+                  ? 'border-slate-950 bg-slate-950 text-white'
+                  : 'border-slate-300 bg-white text-slate-700'
               }`}
-              key={type}
-              onClick={() => setPaymentType(type)}
+              key={`${method.provider}/${method.channel}`}
+              onClick={() => setSelectedPayment(method)}
               type="button"
             >
-              {type === 'alipay' ? '支付宝' : '微信'}
+              {method.label}
             </button>
           ))}
         </div>
+        {paymentMethods.length === 0 && <p className="mt-2 text-sm text-amber-700">管理员尚未配置支付方式。</p>}
       </fieldset>
 
       <div className="flex flex-col-reverse gap-3 sm:flex-row sm:justify-end">
@@ -576,13 +710,51 @@ function CheckoutPage({
         </button>
         <button
           className="inline-flex h-10 items-center justify-center gap-2 rounded-md bg-slate-950 px-4 text-sm font-medium text-white disabled:cursor-wait disabled:bg-slate-400"
-          disabled={submitting}
+          disabled={submitting || !selectedPayment}
           type="submit"
         >
           <CreditCard size={18} />
           {submitting ? '提交中' : '提交并支付'}
         </button>
       </div>
+      {qrOrder?.payment_action?.type === 'qr_code' && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/60 p-4" role="dialog" aria-modal="true">
+          <div className="w-full max-w-sm rounded-lg bg-white p-6 text-center shadow-xl">
+            <div className="flex items-start justify-between gap-3 text-left">
+              <div>
+                <h3 className="text-lg font-semibold">微信扫码支付</h3>
+                <p className="mt-1 text-sm text-slate-500">订单号：{qrOrder.id}</p>
+              </div>
+              <button
+                aria-label="关闭支付二维码"
+                className="rounded p-1 text-slate-500 hover:bg-slate-100"
+                onClick={() => onCreated(qrOrder)}
+                type="button"
+              >
+                <X size={20} />
+              </button>
+            </div>
+            <div className="mt-5 flex min-h-72 items-center justify-center rounded-md border border-slate-200 bg-white p-3">
+              {qrImage ? <img alt="微信支付二维码" className="h-64 w-64" src={qrImage} /> : <p className="text-sm text-slate-500">二维码生成中...</p>}
+            </div>
+            <p className={`mt-3 text-sm ${remainingSeconds > 0 ? 'text-slate-600' : 'text-red-600'}`}>
+              {remainingSeconds > 0
+                ? `请在 ${Math.floor(remainingSeconds / 60)}:${String(remainingSeconds % 60).padStart(2, '0')} 内支付`
+                : '支付二维码已过期，请重新下单'}
+            </p>
+            <button
+              className="mt-4 inline-flex h-10 w-full items-center justify-center gap-2 rounded-md bg-emerald-600 px-4 text-sm font-medium text-white disabled:bg-slate-400"
+              disabled={reconciling}
+              onClick={() => void reconcilePayment()}
+              type="button"
+            >
+              <RefreshCcw className={reconciling ? 'animate-spin' : ''} size={17} />
+              {reconciling ? '正在向微信查单' : '我已支付'}
+            </button>
+            <p className="mt-3 text-xs leading-5 text-slate-500">支付确认后页面会自动进入订单查询；关闭窗口不会取消订单。</p>
+          </div>
+        </div>
+      )}
     </form>
   );
 }
@@ -969,6 +1141,8 @@ function statusText(status: string) {
     pending: '待支付',
     paid: '已支付',
     preorder: '预购',
+    expired: '已过期',
+    cancelled: '已取消',
   };
   return texts[status] ?? status;
 }

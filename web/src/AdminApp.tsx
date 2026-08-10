@@ -1647,13 +1647,14 @@ function OrdersPanel({
       </div>
 
       <div className="mt-4 overflow-x-auto">
-        <table className="min-w-[920px] text-left text-sm">
+        <table className="min-w-[1180px] text-left text-sm">
           <thead className="border-b border-slate-200 text-xs uppercase text-slate-500">
             <tr>
               <th className="py-2 pr-3 font-medium">订单号</th>
               <th className="px-3 py-2 font-medium">商品</th>
               <th className="px-3 py-2 font-medium">联系方式</th>
               <th className="px-3 py-2 font-medium">状态</th>
+              <th className="px-3 py-2 font-medium">支付渠道</th>
               <th className="px-3 py-2 font-medium">下单时间</th>
               <th className="px-3 py-2 font-medium">发货内容</th>
             </tr>
@@ -1669,6 +1670,11 @@ function OrdersPanel({
                 <td className="px-3 py-2">
                   <OrderStatusBadge status={order.status} />
                 </td>
+                <td className="max-w-[220px] px-3 py-2 text-xs text-slate-600">
+                  <p className="font-medium text-slate-800">{paymentMethodText(order.payment_provider, order.payment_channel)}</p>
+                  <p className="mt-1">支付状态：{order.payment_state}</p>
+                  <p className="mt-1 font-mono break-all">{order.provider_transaction_id ?? order.merchant_trade_no}</p>
+                </td>
                 <td className="px-3 py-2 text-slate-600">{formatDate(order.created_at)}</td>
                 <td className="max-w-[260px] px-3 py-2">
                   <pre className="max-h-20 overflow-auto whitespace-pre-wrap break-words rounded-md bg-slate-50 p-2 text-xs text-slate-700">
@@ -1679,7 +1685,7 @@ function OrdersPanel({
             ))}
             {orders.length === 0 && (
               <tr>
-                <td className="py-6 text-sm text-slate-500" colSpan={6}>
+                <td className="py-6 text-sm text-slate-500" colSpan={7}>
                   暂无订单
                 </td>
               </tr>
@@ -2055,8 +2061,20 @@ function statusText(status: string) {
     pending: '待支付',
     paid: '已支付',
     preorder: '预购',
+    expired: '已过期',
+    cancelled: '已取消',
   };
   return texts[status] ?? status;
+}
+
+function paymentMethodText(provider: string, channel: string) {
+  const methods: Record<string, string> = {
+    'epay/alipay': '支付宝（易支付）',
+    'epay/wxpay': '微信（易支付）',
+    'epay/legacy': '易支付（历史）',
+    'wechatpay/native': '微信支付官方 Native',
+  };
+  return methods[`${provider}/${channel}`] ?? `${provider}/${channel}`;
 }
 
 function productStatusText(status: string) {

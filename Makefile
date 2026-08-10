@@ -2,7 +2,7 @@ SHELL := /usr/bin/env bash
 .DEFAULT_GOAL := help
 
 PODMAN ?= podman
-POSTGRES_IMAGE ?= docker.io/library/postgres:16-alpine
+POSTGRES_IMAGE ?= docker.io/library/postgres:18.4-alpine
 DB_CONTAINER ?= qddxp-postgres
 POSTGRES_DB ?= qddxp
 POSTGRES_USER ?= postgres
@@ -17,11 +17,19 @@ WEB_RETURN_URL ?= http://localhost:$(API_PORT)/delivery
 WEB_DIST_DIR ?= $(CURDIR)/web/dist
 ADMIN_KEY ?= change-me
 ORDER_PASSWORD_PEPPER ?= dev-insecure-change-me
+PAYMENT_EXPIRE_MINUTES ?= 15
 RUST_LOG ?= info
 
 EPAY_GATEWAY ?=
 EPAY_PID ?=
 EPAY_KEY ?=
+WXPAY_APP_ID ?=
+WXPAY_MCH_ID ?=
+WXPAY_MERCHANT_SERIAL_NO ?=
+WXPAY_MERCHANT_PRIVATE_KEY_PATH ?=
+WXPAY_API_V3_KEY ?=
+WXPAY_PUBLIC_KEY_ID ?=
+WXPAY_PUBLIC_KEY_PATH ?=
 
 .PHONY: help dev srv web-build db-up
 
@@ -40,10 +48,18 @@ srv: db-up web-build ## Start the backend with local development environment var
 		WEB_DIST_DIR='$(WEB_DIST_DIR)' \
 		ADMIN_KEY='$(ADMIN_KEY)' \
 		ORDER_PASSWORD_PEPPER='$(ORDER_PASSWORD_PEPPER)' \
+		PAYMENT_EXPIRE_MINUTES='$(PAYMENT_EXPIRE_MINUTES)' \
 		RUST_LOG='$(RUST_LOG)' \
 		EPAY_GATEWAY='$(EPAY_GATEWAY)' \
 		EPAY_PID='$(EPAY_PID)' \
 		EPAY_KEY='$(EPAY_KEY)' \
+		WXPAY_APP_ID='$(WXPAY_APP_ID)' \
+		WXPAY_MCH_ID='$(WXPAY_MCH_ID)' \
+		WXPAY_MERCHANT_SERIAL_NO='$(WXPAY_MERCHANT_SERIAL_NO)' \
+		WXPAY_MERCHANT_PRIVATE_KEY_PATH='$(WXPAY_MERCHANT_PRIVATE_KEY_PATH)' \
+		WXPAY_API_V3_KEY='$(WXPAY_API_V3_KEY)' \
+		WXPAY_PUBLIC_KEY_ID='$(WXPAY_PUBLIC_KEY_ID)' \
+		WXPAY_PUBLIC_KEY_PATH='$(WXPAY_PUBLIC_KEY_PATH)' \
 		cargo run
 
 web-build: ## Build frontend static assets served by the backend.

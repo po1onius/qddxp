@@ -16,7 +16,7 @@ use crate::{
     config::AppConfig,
     db::{
         models::{ApiCallLog, NewProduct, NewProductInfo, Order, Product, ProductInfo},
-        schema::{api_call_logs, orders, product_info, products},
+        schema::{api_call_logs, orders, payment_attempts, product_info, products},
         settings::{load_order_allocation_mode, save_order_allocation_mode},
     },
     domain::{OrderAllocationMode, OrderStatus, ProductStatus},
@@ -119,6 +119,13 @@ pub struct AdminOrderResponse {
     pub paid_at: Option<DateTime<Utc>>,
     pub status: String,
     pub contact: String,
+    pub payment_provider: String,
+    pub payment_channel: String,
+    pub merchant_trade_no: String,
+    pub provider_transaction_id: Option<String>,
+    pub payment_state: String,
+    pub amount_cents: i64,
+    pub currency: String,
 }
 
 pub async fn create_product_info(
@@ -611,24 +618,30 @@ pub async fn list_orders(
 
     let mut conn = state.pool.get().await?;
     let total = orders::table
-        .inner_join(product_info::table.on(product_info::id.eq(orders::product_info_id)))
         .select(count_star())
         .first::<i64>(&mut conn)
         .await?;
 
     let orders = orders::table
-        .inner_join(product_info::table.on(product_info::id.eq(orders::product_info_id)))
+        .inner_join(payment_attempts::table.on(payment_attempts::order_id.eq(orders::id)))
         .left_join(products::table.on(products::id.nullable().eq(orders::product_id)))
         .select((
             orders::id,
             orders::product_id,
             orders::product_info_id,
-            product_info::name,
+            orders::product_name_snapshot,
             products::content.nullable(),
             orders::created_at,
             orders::paid_at,
             orders::status,
             orders::contact,
+            payment_attempts::provider,
+            payment_attempts::channel,
+            payment_attempts::merchant_trade_no,
+            payment_attempts::provider_transaction_id,
+            payment_attempts::state,
+            orders::amount_cents,
+            orders::currency,
         ))
         .order((orders::created_at.desc(), orders::id.desc()))
         .limit(page_size)
