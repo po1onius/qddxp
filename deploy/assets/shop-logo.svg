@@ -1,7 +1,37 @@
-<svg xmlns="http://www.w3.org/2000/svg" width="160" height="64" viewBox="0 0 160 64" fill="none">
-  <rect width="160" height="64" rx="14" fill="#0F172A"/>
-  <path d="M35 18H25L20 26V47H48V26L43 18H35Z" fill="#F8FAFC"/>
-  <path d="M27 18C27 13.582 30.582 10 35 10C39.418 10 43 13.582 43 18" stroke="#34D399" stroke-width="4" stroke-linecap="round"/>
-  <path d="M63 22H139" stroke="#F8FAFC" stroke-width="6" stroke-linecap="round"/>
-  <path d="M63 39H119" stroke="#34D399" stroke-width="6" stroke-linecap="round"/>
+<svg xmlns="http://www.w3.org/2000/svg" width="128" height="128" viewBox="0 0 128 128" fill="none" role="img" aria-labelledby="title description">
+  <title id="title">卡通小白羊</title>
+  <desc id="description">一只戴着绿色铃铛、脸颊粉红的可爱白色小羊</desc>
+
+  <!-- 柔和的圆角底色让图案在浅色页面和浏览器标签栏中都保持清晰。 -->
+  <rect x="4" y="4" width="120" height="120" rx="30" fill="#ECFDF5"/>
+  <path d="M22 29V39M17 34H27" stroke="#34D399" stroke-width="4" stroke-linecap="round"/>
+  <path d="M103 20V28M99 24H107" stroke="#FBBF24" stroke-width="3" stroke-linecap="round"/>
+  <circle cx="107" cy="44" r="3" fill="#60A5FA"/>
+
+  <!-- 两只软软的耳朵放在羊毛后方，耳蜗使用粉色强调可爱感。 -->
+  <path d="M38 53C28 43 16 45 17 56C18 66 28 72 39 67" fill="#F5C9A9" stroke="#475569" stroke-width="4" stroke-linecap="round" stroke-linejoin="round"/>
+  <path d="M90 53C100 43 112 45 111 56C110 66 100 72 89 67" fill="#F5C9A9" stroke="#475569" stroke-width="4" stroke-linecap="round" stroke-linejoin="round"/>
+  <path d="M25 54C29 54 33 57 36 61" stroke="#F9A8B8" stroke-width="4" stroke-linecap="round"/>
+  <path d="M103 54C99 54 95 57 92 61" stroke="#F9A8B8" stroke-width="4" stroke-linecap="round"/>
+
+  <!-- 连续的云朵轮廓组成蓬松羊毛，避免小尺寸显示时出现杂乱的内部描边。 -->
+  <path d="M39 78C29 78 22 71 24 62C17 56 19 45 28 41C27 31 38 24 47 29C52 19 67 18 73 27C82 21 94 27 94 37C104 40 109 51 103 59C108 68 101 78 91 78H39Z" fill="white" stroke="#475569" stroke-width="4" stroke-linecap="round" stroke-linejoin="round"/>
+
+  <!-- 暖色面部、亮眼和腮红构成主要表情。 -->
+  <path d="M39 57C39 45 50 38 64 38C78 38 89 45 89 57V76C89 93 79 103 64 103C49 103 39 93 39 76V57Z" fill="#F5C9A9" stroke="#475569" stroke-width="4" stroke-linejoin="round"/>
+  <path d="M43 48C45 37 57 32 66 38C70 30 83 34 85 45C80 42 75 44 72 49C66 45 59 45 54 50C50 47 47 47 43 48Z" fill="white" stroke="#475569" stroke-width="4" stroke-linecap="round" stroke-linejoin="round"/>
+
+  <ellipse cx="53" cy="66" rx="4" ry="5" fill="#1E293B"/>
+  <ellipse cx="75" cy="66" rx="4" ry="5" fill="#1E293B"/>
+  <circle cx="54.5" cy="64.5" r="1.5" fill="white"/>
+  <circle cx="76.5" cy="64.5" r="1.5" fill="white"/>
+  <ellipse cx="47" cy="77" rx="6" ry="3.5" fill="#F9A8B8" opacity="0.9"/>
+  <ellipse cx="81" cy="77" rx="6" ry="3.5" fill="#F9A8B8" opacity="0.9"/>
+  <path d="M60 76C61.5 74 66.5 74 68 76C68 79 66 81 64 81C62 81 60 79 60 76Z" fill="#A8556A"/>
+  <path d="M64 81V84M64 84C61 87 58 86 57 84M64 84C67 87 70 86 71 84" stroke="#7C3F4C" stroke-width="2.5" stroke-linecap="round"/>
+
+  <!-- 绿色项圈与金色铃铛呼应商城的主色。 -->
+  <path d="M45 94C50 101 56 104 64 104C72 104 78 101 83 94" stroke="#10B981" stroke-width="6" stroke-linecap="round"/>
+  <circle cx="64" cy="105" r="7" fill="#FBBF24" stroke="#475569" stroke-width="3"/>
+  <path d="M61 106H67" stroke="#92400E" stroke-width="2" stroke-linecap="round"/>
 </svg>

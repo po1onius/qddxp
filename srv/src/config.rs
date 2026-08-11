@@ -225,6 +225,7 @@ mod tests {
             br#"<?xml version="1.0"?><svg xmlns="http://www.w3.org/2000/svg"></svg>"#
         ));
         assert!(is_svg(br#"<svg viewBox="0 0 10 10"></svg>"#));
+        assert!(is_svg(include_bytes!("../../deploy/assets/shop-logo.svg")));
     }
 
     #[test]

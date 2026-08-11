@@ -437,10 +437,7 @@ export function AdminApp({ storefront }: { storefront: StorefrontConfig }) {
     <div className="min-h-screen bg-zinc-50 text-slate-950">
       <header className="border-b border-slate-200 bg-white">
         <div className="mx-auto flex max-w-7xl flex-col gap-4 px-4 py-4 lg:flex-row lg:items-center lg:justify-between lg:px-8">
-          <div>
-            <StoreBrand storefront={storefront} />
-            <h1 className="text-2xl font-semibold tracking-normal">管理后台</h1>
-          </div>
+          <StoreBrand storefront={storefront} />
           <div className="flex flex-col gap-3 sm:flex-row sm:items-end lg:justify-end">
             <AdminKeyPanel adminKey={adminKey} onClear={clearAdminKey} onSave={saveAdminKey} />
             <button
@@ -456,6 +453,7 @@ export function AdminApp({ storefront }: { storefront: StorefrontConfig }) {
       </header>
 
       <main className="mx-auto max-w-7xl px-4 py-6 lg:px-8">
+        <h1 className="mb-6 text-2xl font-semibold tracking-normal">管理后台</h1>
         <section className="grid gap-4 md:grid-cols-4">
           <MetricCard icon={<Boxes size={19} />} label="商品种类" value={products.length.toString()} />
           <MetricCard icon={<PackagePlus size={19} />} label="可售库存" value={totalStock.toString()} />
@@ -667,10 +665,17 @@ function ProductInfoCatalogPanel({
   productOptions: ProductOption[];
 }) {
   const [showCreateModal, setShowCreateModal] = useState(false);
+  const [showAllProductInfos, setShowAllProductInfos] = useState(false);
   const [updatingProductInfoId, setUpdatingProductInfoId] = useState<string | null>(null);
   const [page, setPage] = useState(1);
-  const totalPages = Math.max(1, Math.ceil(productOptions.length / PRODUCT_INFO_PAGE_SIZE));
-  const visibleProductOptions = productOptions.slice((page - 1) * PRODUCT_INFO_PAGE_SIZE, page * PRODUCT_INFO_PAGE_SIZE);
+  // 默认只展示仍在售的商品信息；勾选“全部”后再把下架项纳入分页，避免隐藏项
+  // 占用页码而造成某些页面显示数量不足。
+  const filteredProductOptions = showAllProductInfos ? productOptions : productOptions.filter((product) => product.active);
+  const totalPages = Math.max(1, Math.ceil(filteredProductOptions.length / PRODUCT_INFO_PAGE_SIZE));
+  const visibleProductOptions = filteredProductOptions.slice(
+    (page - 1) * PRODUCT_INFO_PAGE_SIZE,
+    page * PRODUCT_INFO_PAGE_SIZE,
+  );
 
   useEffect(() => {
     if (page > totalPages) {
@@ -706,8 +711,20 @@ function ProductInfoCatalogPanel({
           <h2 className="text-base font-semibold">商品信息</h2>
         </div>
         <div className="flex flex-wrap items-center justify-end gap-2">
+          <label className="inline-flex h-9 cursor-pointer items-center gap-2 rounded-md border border-slate-300 bg-white px-3 text-sm font-medium text-slate-700 hover:border-slate-500">
+            <input
+              checked={showAllProductInfos}
+              className="h-4 w-4 accent-slate-950"
+              onChange={(event) => {
+                setShowAllProductInfos(event.target.checked);
+                setPage(1);
+              }}
+              type="checkbox"
+            />
+            全部
+          </label>
           {loading && <Loader2 className="animate-spin text-slate-500" size={18} />}
-          {productOptions.length > PRODUCT_INFO_PAGE_SIZE && (
+          {filteredProductOptions.length > PRODUCT_INFO_PAGE_SIZE && (
             <OffsetPaginationControls loading={loading} onPageChange={setPage} page={page} totalPages={totalPages} />
           )}
         </div>
@@ -738,6 +755,11 @@ function ProductInfoCatalogPanel({
       {productOptions.length === 0 && !loading && (
         <p className="mt-4 rounded-md border border-slate-200 bg-white px-3 py-2 text-sm text-slate-500">暂无商品信息</p>
       )}
+      {productOptions.length > 0 && filteredProductOptions.length === 0 && !loading && (
+        <p className="mt-4 rounded-md border border-slate-200 bg-white px-3 py-2 text-sm text-slate-500">
+          暂无上架商品信息，勾选“全部”可查看下架商品。
+        </p>
+      )}
 
       {showCreateModal && (
         <ProductInfoModal
@@ -767,39 +789,47 @@ function ProductInfoCard({
   const actionText = product.active ? '下架' : '上架';
 
   return (
-    <article className="overflow-hidden rounded-md border border-slate-200 bg-white text-left shadow-panel">
-      <div className="flex h-48 items-center justify-center bg-slate-100">
-        {imageSrc ? (
-          <img alt={product.name} className="h-full w-full object-contain p-2" src={imageSrc} />
-        ) : (
-          <span className="px-4 text-center text-sm font-medium text-slate-500">{product.name}</span>
-        )}
-      </div>
-      <div className="space-y-4 p-4">
-        <div className="flex items-start justify-between gap-3">
-          <div className="min-w-0">
-            <h3 className="truncate text-base font-semibold leading-6">{product.name}</h3>
-            <p className="mt-1 break-all font-mono text-xs text-slate-400">{product.id}</p>
-            <p className="mt-1 text-sm text-slate-500">
-              库存 {product.stock ?? '-'} · 已售 {product.sold_count}
-            </p>
+    <article
+      className={`relative overflow-hidden rounded-md border bg-white text-left shadow-panel ${
+        product.active ? 'border-slate-200' : 'border-slate-300'
+      }`}
+      data-active={product.active}
+    >
+      <div className={product.active ? undefined : 'grayscale opacity-70'}>
+        <div className="flex h-48 items-center justify-center bg-slate-100">
+          {imageSrc ? (
+            <img alt={product.name} className="h-full w-full object-contain p-2" src={imageSrc} />
+          ) : (
+            <span className="px-4 text-center text-sm font-medium text-slate-500">{product.name}</span>
+          )}
+        </div>
+        <div className="space-y-4 p-4">
+          <div className="flex items-start justify-between gap-3">
+            <div className="min-w-0">
+              <h3 className="truncate text-base font-semibold leading-6">{product.name}</h3>
+              <p className="mt-1 break-all font-mono text-xs text-slate-400">{product.id}</p>
+              <p className="mt-1 text-sm text-slate-500">
+                库存 {product.stock ?? '-'} · 已售 {product.sold_count}
+              </p>
+            </div>
+            <p className="shrink-0 text-base font-semibold text-emerald-700">{formatPrice(product.price_cents)}</p>
           </div>
-          <p className="shrink-0 text-base font-semibold text-emerald-700">{formatPrice(product.price_cents)}</p>
-        </div>
-        <div className="flex items-center justify-between gap-3">
-          <StatusPill active={product.active} />
-          <button
-            aria-label={`${actionText}商品信息 ${product.name}`}
-            className="inline-flex h-9 items-center justify-center gap-2 rounded-md border border-slate-300 bg-white px-3 text-sm font-medium text-slate-700 hover:border-slate-500 disabled:cursor-wait disabled:opacity-60"
-            disabled={updating}
-            onClick={onToggleActive}
-            type="button"
-          >
-            {updating ? <Loader2 className="animate-spin" size={17} /> : product.active ? <PowerOff size={17} /> : <Power size={17} />}
-            {actionText}
-          </button>
+          <div className="flex items-center justify-between gap-3">
+            <StatusPill active={product.active} />
+            <button
+              aria-label={`${actionText}商品信息 ${product.name}`}
+              className="inline-flex h-9 items-center justify-center gap-2 rounded-md border border-slate-300 bg-white px-3 text-sm font-medium text-slate-700 hover:border-slate-500 disabled:cursor-wait disabled:opacity-60"
+              disabled={updating}
+              onClick={onToggleActive}
+              type="button"
+            >
+              {updating ? <Loader2 className="animate-spin" size={17} /> : product.active ? <PowerOff size={17} /> : <Power size={17} />}
+              {actionText}
+            </button>
+          </div>
         </div>
       </div>
+      {!product.active && <div aria-hidden="true" className="pointer-events-none absolute inset-0 bg-slate-300/35" />}
     </article>
   );
 }

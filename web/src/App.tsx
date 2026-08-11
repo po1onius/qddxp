@@ -181,9 +181,7 @@ function ShopApp({ storefront }: { storefront: StorefrontConfig }) {
     <div className="min-h-screen bg-slate-50 text-slate-950">
       <header className="border-b border-slate-200 bg-white">
         <div className="mx-auto flex max-w-7xl flex-col gap-4 px-4 py-4 sm:flex-row sm:items-center sm:justify-between lg:px-8">
-          <div>
-            <StoreBrand storefront={storefront} />
-          </div>
+          <StoreBrand storefront={storefront} />
           <nav className="flex flex-wrap gap-2" aria-label="主导航">
             <Link
               className="inline-flex h-10 items-center gap-2 rounded-md border border-slate-300 bg-white px-3 text-sm font-medium text-slate-700 transition hover:border-slate-500"
@@ -300,10 +298,7 @@ function CreateOrderApp({ storefront }: { storefront: StorefrontConfig }) {
     <div className="min-h-screen bg-slate-50 text-slate-950">
       <header className="border-b border-slate-200 bg-white">
         <div className="mx-auto flex max-w-7xl flex-col gap-4 px-4 py-4 sm:flex-row sm:items-center sm:justify-between lg:px-8">
-          <div>
-            <StoreBrand storefront={storefront} />
-            <h1 className="text-xl font-semibold">创建订单</h1>
-          </div>
+          <StoreBrand storefront={storefront} />
           <nav aria-label="创建订单导航">
             <Link
               className="inline-flex h-10 items-center gap-2 rounded-md border border-slate-300 bg-white px-3 text-sm font-medium text-slate-700 transition hover:border-slate-500"
@@ -316,6 +311,8 @@ function CreateOrderApp({ storefront }: { storefront: StorefrontConfig }) {
         </div>
       </header>
       <main className="mx-auto max-w-7xl px-4 py-8 lg:px-8">
+        {/* 页面标题属于当前业务内容，不放入全站复用的品牌区域。 */}
+        <h1 className="mb-6 text-2xl font-semibold">创建订单</h1>
         {loading && (
           <div className="h-96 max-w-2xl animate-pulse rounded-md border border-slate-200 bg-white" aria-label="正在加载下单页面" />
         )}
@@ -347,10 +344,7 @@ function OrdersApp({ storefront }: { storefront: StorefrontConfig }) {
     <div className="min-h-screen bg-slate-50 text-slate-950">
       <header className="border-b border-slate-200 bg-white">
         <div className="mx-auto flex max-w-7xl flex-col gap-4 px-4 py-4 sm:flex-row sm:items-center sm:justify-between lg:px-8">
-          <div>
-            <StoreBrand storefront={storefront} />
-            <h1 className="text-xl font-semibold">订单查询</h1>
-          </div>
+          <StoreBrand storefront={storefront} />
           <nav aria-label="订单查询导航">
             <Link
               className="inline-flex h-10 items-center gap-2 rounded-md border border-slate-300 bg-white px-3 text-sm font-medium text-slate-700 transition hover:border-slate-500"
@@ -363,6 +357,7 @@ function OrdersApp({ storefront }: { storefront: StorefrontConfig }) {
         </div>
       </header>
       <main className="mx-auto max-w-7xl px-4 py-8 lg:px-8">
+        <h1 className="mb-6 text-2xl font-semibold">订单查询</h1>
         <OrderQueryPage />
       </main>
     </div>
@@ -420,7 +415,7 @@ function CatalogPage({
     <div className="space-y-5">
       <div className="flex flex-col gap-3 sm:flex-row sm:items-end sm:justify-between">
         <div>
-          <h2 className="text-xl font-semibold">商品列表</h2>
+          <h1 className="text-2xl font-semibold">商品列表</h1>
         </div>
         <div className="flex flex-wrap gap-2">
           <button
@@ -744,10 +739,7 @@ function CheckoutPage({
 
   return (
     <form className="max-w-2xl space-y-5 rounded-md border border-slate-200 bg-white p-6 shadow-panel" onSubmit={submit}>
-      <div>
-        <h2 className="text-xl font-semibold">创建订单</h2>
-        <p className="mt-1 text-sm text-slate-500">订单密码用于支付后查询和取货，请自行保存。</p>
-      </div>
+      <p className="text-sm text-slate-500">订单密码用于支付后查询和取货，请自行保存。</p>
 
       <div className="rounded-md border border-slate-200 bg-slate-50 p-4">
         <p className="text-sm text-slate-500">当前商品</p>
@@ -1008,10 +1000,7 @@ function OrderQueryPage() {
 
       {paymentReturn.kind !== 'success' && (
         <form className="space-y-5 rounded-md border border-slate-200 bg-white p-6 shadow-panel" onSubmit={searchOrders}>
-          <div>
-            <h2 className="text-xl font-semibold">订单查询</h2>
-            <p className="mt-1 text-sm text-slate-500">使用下单时填写的联系方式查找订单。</p>
-          </div>
+          <p className="text-sm text-slate-500">使用下单时填写的联系方式查找订单。</p>
           <label className="block">
             <span className="text-sm font-medium text-slate-700">联系方式</span>
             <input
