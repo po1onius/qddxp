@@ -27,7 +27,7 @@ const LAST_ORDER_ID_STORAGE = 'qddxp_last_order_id';
 const LAST_CONTACT_STORAGE = 'qddxp_last_contact';
 const PRODUCT_PAGE_SIZE = 20;
 const CONTACT_ORDER_PAGE_SIZE = 20;
-const ADMIN_PAGE_PATH = '/a-dmin';
+const ADMIN_PAGE_PATH = '/admin';
 const ORDER_QUERY_PAGE_PATH = '/orders';
 const ORDER_CREATE_PAGE_PATH = '/orders/new';
 

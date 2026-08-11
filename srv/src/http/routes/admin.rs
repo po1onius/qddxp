@@ -3,17 +3,17 @@ use std::collections::{HashMap, HashSet};
 use axum::{
     Json,
     extract::{Path, Query, State},
-    http::{HeaderMap, StatusCode},
+    http::StatusCode,
 };
 use chrono::{DateTime, Utc};
 use diesel::{dsl::count_star, prelude::*};
 use diesel_async::{AsyncConnection, RunQueryDsl};
 use serde::{Deserialize, Serialize};
+use tower_sessions::Session;
 use uuid::Uuid;
 
 use crate::{
     AppState,
-    config::AppConfig,
     db::{
         models::{ApiCallLog, NewProduct, NewProductInfo, Product, ProductInfo},
         schema::{api_call_logs, orders, payment_attempts, product_info, products},
@@ -21,7 +21,7 @@ use crate::{
     domain::{OrderStatus, ProductStatus},
     error::AppError,
     http::pagination::{OffsetPageResponse, OffsetPagination, normalize_offset_page},
-    security::require_admin,
+    security::is_admin_session,
 };
 
 #[derive(Debug, Deserialize)]
@@ -118,10 +118,10 @@ pub struct AdminOrderResponse {
 
 pub async fn create_product_info(
     State(state): State<AppState>,
-    headers: HeaderMap,
+    session: Session,
     Json(request): Json<CreateProductInfoRequest>,
 ) -> Result<(StatusCode, Json<ProductInfoResponse>), AppError> {
-    require_admin_for(&headers, state.config.as_ref(), "create_product_info")?;
+    require_admin_for(&session, "create_product_info").await?;
     validate_product_info(&request.name, request.price_cents)?;
     let active = request.active.unwrap_or(true);
     tracing::info!(
@@ -163,9 +163,9 @@ pub async fn create_product_info(
 
 pub async fn list_product_info(
     State(state): State<AppState>,
-    headers: HeaderMap,
+    session: Session,
 ) -> Result<Json<Vec<ProductInfoResponse>>, AppError> {
-    require_admin_for(&headers, state.config.as_ref(), "list_product_info")?;
+    require_admin_for(&session, "list_product_info").await?;
     tracing::info!("admin listing product info");
 
     let mut conn = state.pool.get().await?;
@@ -189,15 +189,11 @@ pub async fn list_product_info(
 
 pub async fn update_product_info_active(
     State(state): State<AppState>,
-    headers: HeaderMap,
+    session: Session,
     Path(id): Path<Uuid>,
     Json(request): Json<UpdateProductInfoActiveRequest>,
 ) -> Result<Json<ProductInfoResponse>, AppError> {
-    require_admin_for(
-        &headers,
-        state.config.as_ref(),
-        "update_product_info_active",
-    )?;
+    require_admin_for(&session, "update_product_info_active").await?;
     tracing::info!(
         product_info_id = %id,
         active = request.active,
@@ -264,10 +260,10 @@ async fn paid_order_counts(
 
 pub async fn create_product(
     State(state): State<AppState>,
-    headers: HeaderMap,
+    session: Session,
     Json(request): Json<CreateProductRequest>,
 ) -> Result<(StatusCode, Json<CreateProductResponse>), AppError> {
-    require_admin_for(&headers, state.config.as_ref(), "create_product")?;
+    require_admin_for(&session, "create_product").await?;
 
     let contents = product_contents(&request)?;
     tracing::info!(
@@ -324,10 +320,10 @@ pub async fn create_product(
 
 pub async fn update_product_status(
     State(state): State<AppState>,
-    headers: HeaderMap,
+    session: Session,
     Json(request): Json<UpdateProductStatusRequest>,
 ) -> Result<Json<UpdateProductStatusResponse>, AppError> {
-    require_admin_for(&headers, state.config.as_ref(), "update_product_status")?;
+    require_admin_for(&session, "update_product_status").await?;
 
     let target_status = request
         .status
@@ -400,10 +396,10 @@ pub async fn update_product_status(
 
 pub async fn list_products(
     State(state): State<AppState>,
-    headers: HeaderMap,
+    session: Session,
     Query(request): Query<AdminProductQuery>,
 ) -> Result<Json<OffsetPageResponse<AdminProductResponse>>, AppError> {
-    require_admin_for(&headers, state.config.as_ref(), "list_products")?;
+    require_admin_for(&session, "list_products").await?;
     let pagination = OffsetPagination {
         page: request.page,
         page_size: request.page_size,
@@ -504,10 +500,10 @@ pub async fn list_products(
 
 pub async fn list_orders(
     State(state): State<AppState>,
-    headers: HeaderMap,
+    session: Session,
     Query(pagination): Query<OffsetPagination>,
 ) -> Result<Json<OffsetPageResponse<AdminOrderResponse>>, AppError> {
-    require_admin_for(&headers, state.config.as_ref(), "list_orders")?;
+    require_admin_for(&session, "list_orders").await?;
     let (page, page_size, offset) = normalize_offset_page(&pagination)?;
     tracing::info!(page, page_size, offset, "admin listing orders");
 
@@ -561,10 +557,10 @@ pub async fn list_orders(
 
 pub async fn list_api_call_logs(
     State(state): State<AppState>,
-    headers: HeaderMap,
+    session: Session,
     Query(pagination): Query<OffsetPagination>,
 ) -> Result<Json<OffsetPageResponse<ApiCallLog>>, AppError> {
-    require_admin_for(&headers, state.config.as_ref(), "list_api_call_logs")?;
+    require_admin_for(&session, "list_api_call_logs").await?;
     let (page, page_size, offset) = normalize_offset_page(&pagination)?;
     tracing::info!(page, page_size, offset, "admin listing api call logs");
 
@@ -596,21 +592,14 @@ pub async fn list_api_call_logs(
     }))
 }
 
-fn require_admin_for(
-    headers: &HeaderMap,
-    config: &AppConfig,
-    action: &'static str,
-) -> Result<(), AppError> {
-    match require_admin(headers, config) {
-        Ok(()) => {
-            tracing::debug!(action, "admin auth accepted");
-            Ok(())
-        }
-        Err(error) => {
-            tracing::warn!(action, error = ?error, "admin auth rejected");
-            Err(error)
-        }
+async fn require_admin_for(session: &Session, action: &'static str) -> Result<(), AppError> {
+    if is_admin_session(session).await? {
+        tracing::debug!(action, "admin session auth accepted");
+        return Ok(());
     }
+
+    tracing::warn!(action, "admin session auth rejected");
+    Err(AppError::Unauthorized)
 }
 
 fn validate_product_info(name: &str, price_cents: i64) -> Result<(), AppError> {

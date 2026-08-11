@@ -1,4 +1,5 @@
 pub mod admin;
+pub mod admin_auth;
 pub mod epay;
 pub mod public;
 pub mod wechatpay;
@@ -49,6 +50,12 @@ pub fn router(state: AppState) -> Router {
         .route(
             "/orders/{id}/payments/wechatpay/query",
             post(wechatpay::reconcile_order),
+        )
+        .route(
+            "/admin/session",
+            get(admin_auth::status)
+                .post(admin_auth::login)
+                .delete(admin_auth::logout),
         )
         .route(
             "/admin/product-info",

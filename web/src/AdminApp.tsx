@@ -9,6 +9,7 @@ import {
   EyeOff,
   FileText,
   Loader2,
+  LogOut,
   PackagePlus,
   Power,
   PowerOff,
@@ -17,19 +18,23 @@ import {
   Save,
   ShieldCheck,
   Store,
-  TicketPlus,
   X,
 } from 'lucide-react';
 import { useToast } from './Toast';
 import { StoreBrand } from './StoreBrand';
 import {
+  ADMIN_SESSION_EXPIRED_EVENT,
+  ApiError,
   createAdminProduct,
   createProductInfo,
+  getAdminSession,
   listAdminApiCallLogs,
   listAdminOrders,
   listAdminProductInfo,
   listAdminProducts,
   listProducts,
+  loginAdmin,
+  logoutAdmin,
   updateAdminProductStatuses,
   updateProductInfoActive,
 } from './api/client';
@@ -46,7 +51,7 @@ import type {
   StorefrontConfig,
 } from './types';
 
-const ADMIN_KEY_STORAGE = 'qddxp_admin_key';
+const LEGACY_ADMIN_KEY_STORAGE = 'qddxp_admin_key';
 const ADMIN_PAGE_SIZE = 20;
 const PRODUCT_INFO_PAGE_SIZE = 8;
 
@@ -108,9 +113,100 @@ function totalPagesFor(total: number, pageSize: number) {
   return Math.max(1, Math.ceil(total / pageSize));
 }
 
+type AdminAuthState = 'checking' | 'authenticated' | 'unauthenticated';
+
 export function AdminApp({ storefront }: { storefront: StorefrontConfig }) {
   const { showToast } = useToast();
-  const [adminKey, setAdminKey] = useState(() => localStorage.getItem(ADMIN_KEY_STORAGE) ?? '');
+  const [authState, setAuthState] = useState<AdminAuthState>('checking');
+  const [loggingOut, setLoggingOut] = useState(false);
+
+  useEffect(() => {
+    let cancelled = false;
+
+    // 旧版本曾把 ADMIN_KEY 明文保存在 localStorage。升级后立即清理遗留值，之后的
+    // 认证凭据只在登录请求体中短暂存在，并由浏览器管理 HttpOnly 会话 Cookie。
+    if (localStorage.getItem(LEGACY_ADMIN_KEY_STORAGE) !== null) {
+      localStorage.removeItem(LEGACY_ADMIN_KEY_STORAGE);
+      console.info('[管理员认证] 已清理旧版本在浏览器中保存的管理员密钥');
+    }
+
+    function handleSessionExpired() {
+      console.warn('[管理员认证] 管理 API 返回未认证，会话可能已经过期');
+      setAuthState('unauthenticated');
+    }
+
+    window.addEventListener(ADMIN_SESSION_EXPIRED_EVENT, handleSessionExpired);
+    void getAdminSession()
+      .then((status) => {
+        if (cancelled) {
+          return;
+        }
+        console.info('[管理员认证] 会话状态检查完成', { authenticated: status.authenticated });
+        setAuthState(status.authenticated ? 'authenticated' : 'unauthenticated');
+      })
+      .catch((error) => {
+        if (cancelled) {
+          return;
+        }
+        console.error('[管理员认证] 会话状态检查失败', error);
+        setAuthState('unauthenticated');
+        showToast({
+          message: error instanceof Error ? error.message : '管理员会话状态检查失败',
+          type: 'error',
+        });
+      });
+
+    return () => {
+      cancelled = true;
+      window.removeEventListener(ADMIN_SESSION_EXPIRED_EVENT, handleSessionExpired);
+    };
+  }, []);
+
+  async function handleLogout() {
+    setLoggingOut(true);
+    try {
+      await logoutAdmin();
+      console.info('[管理员认证] 已退出并清除服务端会话');
+      setAuthState('unauthenticated');
+      showToast({ message: '已安全退出管理后台', type: 'success' });
+    } catch (error) {
+      console.error('[管理员认证] 退出登录失败', error);
+      showToast({
+        message: error instanceof Error ? error.message : '退出登录失败',
+        type: 'error',
+      });
+    } finally {
+      setLoggingOut(false);
+    }
+  }
+
+  if (authState === 'checking') {
+    return <AdminSessionLoadingPage storefront={storefront} />;
+  }
+
+  if (authState === 'unauthenticated') {
+    return <AdminLoginPage onAuthenticated={() => setAuthState('authenticated')} storefront={storefront} />;
+  }
+
+  return (
+    <AdminDashboard
+      loggingOut={loggingOut}
+      onLogout={() => void handleLogout()}
+      storefront={storefront}
+    />
+  );
+}
+
+function AdminDashboard({
+  loggingOut,
+  onLogout,
+  storefront,
+}: {
+  loggingOut: boolean;
+  onLogout: () => void;
+  storefront: StorefrontConfig;
+}) {
+  const { showToast } = useToast();
   const [products, setProducts] = useState<Product[]>([]);
   const [adminProductInfos, setAdminProductInfos] = useState<AdminProductInfo[]>([]);
   const [inventoryProducts, setInventoryProducts] = useState<AdminInventoryProduct[]>([]);
@@ -135,17 +231,10 @@ export function AdminApp({ storefront }: { storefront: StorefrontConfig }) {
     () => mergeInventoryProductOptions(productOptions, inventoryProducts),
     [inventoryProducts, productOptions],
   );
-  const totalStock = useMemo(() => products.reduce((sum, product) => sum + product.stock, 0), [products]);
-  const totalSold = useMemo(() => products.reduce((sum, product) => sum + product.sold_count, 0), [products]);
-  const paidOrders = useMemo(() => orders.filter((order) => order.status === 'paid').length, [orders]);
-  const successfulLogs = useMemo(() => logs.filter((log) => log.success).length, [logs]);
-
   useEffect(() => {
     void refreshProducts();
-    if (adminKey.trim()) {
-      void refreshProductInfo(adminKey);
-      void refreshOrders(adminKey);
-    }
+    void refreshProductInfo();
+    void refreshOrders();
   }, []);
 
   async function refreshProducts() {
@@ -163,16 +252,11 @@ export function AdminApp({ storefront }: { storefront: StorefrontConfig }) {
     }
   }
 
-  async function refreshProductInfo(key = adminKey) {
-    const trimmedKey = key.trim();
-    if (!trimmedKey) {
-      return;
-    }
-
+  async function refreshProductInfo() {
     setLoadingProductInfos(true);
 
     try {
-      setAdminProductInfos(await listAdminProductInfo(trimmedKey));
+      setAdminProductInfos(await listAdminProductInfo());
     } catch (err) {
       showToast({
         message: err instanceof Error ? err.message : '商品信息列表加载失败',
@@ -183,31 +267,23 @@ export function AdminApp({ storefront }: { storefront: StorefrontConfig }) {
     }
   }
 
-  async function refreshInventory(key = adminKey, filters = inventoryFilters, page = inventoryPage) {
-    await loadInventoryPage({ filters, key, page });
+  async function refreshInventory(filters = inventoryFilters, page = inventoryPage) {
+    await loadInventoryPage({ filters, page });
   }
 
   async function loadInventoryPage({
     errorMessage = '库存列表加载失败',
     filters = inventoryFilters,
-    key = adminKey,
     page,
   }: {
     errorMessage?: string;
     filters?: InventoryFilters;
-    key?: string;
     page: number;
   }) {
-    const trimmedKey = key.trim();
-    if (!trimmedKey) {
-      showError('请先保存管理员密钥');
-      return;
-    }
-
     setLoadingInventory(true);
 
     try {
-      const response = await listAdminProducts(trimmedKey, {
+      const response = await listAdminProducts({
         ...inventoryFilterParams(filters),
         page,
         page_size: ADMIN_PAGE_SIZE,
@@ -225,29 +301,21 @@ export function AdminApp({ storefront }: { storefront: StorefrontConfig }) {
     }
   }
 
-  async function refreshOrders(key = adminKey, page = ordersPage) {
-    await loadOrdersPage({ key, page });
+  async function refreshOrders(page = ordersPage) {
+    await loadOrdersPage({ page });
   }
 
   async function loadOrdersPage({
     errorMessage = '订单列表加载失败',
-    key = adminKey,
     page,
   }: {
     errorMessage?: string;
-    key?: string;
     page: number;
   }) {
-    const trimmedKey = key.trim();
-    if (!trimmedKey) {
-      showError('请先保存管理员密钥');
-      return;
-    }
-
     setLoadingOrders(true);
 
     try {
-      const response = await listAdminOrders(trimmedKey, { page, page_size: ADMIN_PAGE_SIZE });
+      const response = await listAdminOrders({ page, page_size: ADMIN_PAGE_SIZE });
       setOrders(response.items);
       setOrdersPage(response.page);
       setOrdersTotal(response.total);
@@ -261,29 +329,21 @@ export function AdminApp({ storefront }: { storefront: StorefrontConfig }) {
     }
   }
 
-  async function refreshLogs(key = adminKey, page = logsPage) {
-    await loadLogsPage({ key, page });
+  async function refreshLogs(page = logsPage) {
+    await loadLogsPage({ page });
   }
 
   async function loadLogsPage({
     errorMessage = '日志列表加载失败',
-    key = adminKey,
     page,
   }: {
     errorMessage?: string;
-    key?: string;
     page: number;
   }) {
-    const trimmedKey = key.trim();
-    if (!trimmedKey) {
-      showError('请先保存管理员密钥');
-      return;
-    }
-
     setLoadingLogs(true);
 
     try {
-      const response = await listAdminApiCallLogs(trimmedKey, { page, page_size: ADMIN_PAGE_SIZE });
+      const response = await listAdminApiCallLogs({ page, page_size: ADMIN_PAGE_SIZE });
       setLogs(response.items);
       setLogsPage(response.page);
       setLogsTotal(response.total);
@@ -302,42 +362,6 @@ export function AdminApp({ storefront }: { storefront: StorefrontConfig }) {
       return;
     }
     showToast({ message, type: 'error' });
-  }
-
-  function saveAdminKey(value: string) {
-    const trimmedKey = value.trim();
-    if (!trimmedKey) {
-      showError('管理员密钥不能为空');
-      return;
-    }
-
-    localStorage.setItem(ADMIN_KEY_STORAGE, trimmedKey);
-    setAdminKey(trimmedKey);
-    showToast({ message: '管理员密钥已保存', type: 'success' });
-    void refreshProductInfo(trimmedKey);
-    void refreshOrders(trimmedKey, 1);
-    if (activeTab === 'inventory') {
-      void refreshInventory(trimmedKey, inventoryFilters, 1);
-    }
-    if (activeTab === 'logs') {
-      void refreshLogs(trimmedKey, 1);
-    }
-  }
-
-  function clearAdminKey() {
-    localStorage.removeItem(ADMIN_KEY_STORAGE);
-    setAdminKey('');
-    setAdminProductInfos([]);
-    setInventoryProducts([]);
-    setOrders([]);
-    setLogs([]);
-    setInventoryPage(1);
-    setInventoryTotal(0);
-    setOrdersPage(1);
-    setOrdersTotal(0);
-    setLogsPage(1);
-    setLogsTotal(0);
-    showToast({ message: '管理员密钥已清除', type: 'success' });
   }
 
   async function loadNextInventoryPage() {
@@ -415,20 +439,18 @@ export function AdminApp({ storefront }: { storefront: StorefrontConfig }) {
 
   function changeInventoryFilters(filters: InventoryFilters) {
     setInventoryFilters(filters);
-    if (adminKey.trim()) {
-      void refreshInventory(adminKey, filters, 1);
-    }
+    void refreshInventory(filters, 1);
   }
 
   function changeTab(tab: AdminTab) {
     setActiveTab(tab);
-    if (tab === 'inventory' && adminKey.trim()) {
+    if (tab === 'inventory') {
       void refreshInventory();
     }
-    if (tab === 'orders' && adminKey.trim()) {
+    if (tab === 'orders') {
       void refreshOrders();
     }
-    if (tab === 'logs' && adminKey.trim()) {
+    if (tab === 'logs') {
       void refreshLogs();
     }
   }
@@ -439,7 +461,15 @@ export function AdminApp({ storefront }: { storefront: StorefrontConfig }) {
         <div className="mx-auto flex max-w-7xl flex-col gap-4 px-4 py-4 lg:flex-row lg:items-center lg:justify-between lg:px-8">
           <StoreBrand storefront={storefront} />
           <div className="flex flex-col gap-3 sm:flex-row sm:items-end lg:justify-end">
-            <AdminKeyPanel adminKey={adminKey} onClear={clearAdminKey} onSave={saveAdminKey} />
+            <button
+              className="inline-flex h-10 items-center justify-center gap-2 rounded-md border border-slate-300 bg-white px-3 text-sm font-medium text-slate-700 hover:border-slate-500 disabled:cursor-wait disabled:opacity-60"
+              disabled={loggingOut}
+              onClick={onLogout}
+              type="button"
+            >
+              {loggingOut ? <Loader2 className="animate-spin" size={18} /> : <LogOut size={18} />}
+              退出登录
+            </button>
             <button
               className="inline-flex h-10 items-center justify-center gap-2 rounded-md border border-slate-300 bg-white px-3 text-sm font-medium text-slate-700 hover:border-slate-500"
               onClick={() => (window.location.href = '/')}
@@ -453,23 +483,10 @@ export function AdminApp({ storefront }: { storefront: StorefrontConfig }) {
       </header>
 
       <main className="mx-auto max-w-7xl px-4 py-6 lg:px-8">
-        <h1 className="mb-6 text-2xl font-semibold tracking-normal">管理后台</h1>
-        <section className="grid gap-4 md:grid-cols-4">
-          <MetricCard icon={<Boxes size={19} />} label="商品种类" value={products.length.toString()} />
-          <MetricCard icon={<PackagePlus size={19} />} label="可售库存" value={totalStock.toString()} />
-          <MetricCard icon={<TicketPlus size={19} />} label="已售数量" value={totalSold.toString()} />
-          <MetricCard
-            icon={activeTab === 'logs' ? <FileText size={19} /> : <ClipboardList size={19} />}
-            label={activeTab === 'logs' ? '成功日志' : '已支付订单'}
-            value={activeTab === 'logs' ? `${successfulLogs}/${logs.length}` : `${paidOrders}/${orders.length}`}
-          />
-        </section>
-
         <AdminNav activeTab={activeTab} onChange={changeTab} />
 
         {activeTab === 'product_info' && (
           <ProductInfoCatalogPanel
-            adminKey={adminKey}
             loading={loadingProducts || loadingProductInfos}
             onCreated={(info) => {
               upsertProductInfo(info);
@@ -489,7 +506,6 @@ export function AdminApp({ storefront }: { storefront: StorefrontConfig }) {
         {activeTab === 'inventory' && (
           <div className="mt-6">
             <InventoryProductsPanel
-              adminKey={adminKey}
               filters={inventoryFilters}
               loading={loadingInventory}
               onFiltersChange={changeInventoryFilters}
@@ -500,7 +516,7 @@ export function AdminApp({ storefront }: { storefront: StorefrontConfig }) {
                   type: 'success',
                 });
                 void refreshProducts();
-                void refreshInventory(adminKey, inventoryFilters, 1);
+                void refreshInventory(inventoryFilters, 1);
               }}
               onInventoryStatusChanged={(updated, ignored, status) => {
                 const action = status === 'available' ? '上架' : '下架';
@@ -513,7 +529,7 @@ export function AdminApp({ storefront }: { storefront: StorefrontConfig }) {
                   type: 'success',
                 });
                 void refreshProducts();
-                void refreshInventory(adminKey, inventoryFilters, inventoryPage);
+                void refreshInventory(inventoryFilters, inventoryPage);
               }}
               onError={showError}
               onNextPage={() => void loadNextInventoryPage()}
@@ -571,7 +587,7 @@ function AdminNav({ activeTab, onChange }: { activeTab: AdminTab; onChange: (tab
   ];
 
   return (
-    <nav className="mt-6 flex flex-wrap gap-2 border-b border-slate-200" aria-label="管理导航">
+    <nav className="flex flex-wrap gap-2 border-b border-slate-200" aria-label="管理导航">
       {tabs.map((tab) => (
         <button
           className={`inline-flex h-11 items-center gap-2 border-b-2 px-3 text-sm font-medium ${
@@ -591,73 +607,135 @@ function AdminNav({ activeTab, onChange }: { activeTab: AdminTab; onChange: (tab
   );
 }
 
-function AdminKeyPanel({
-  adminKey,
-  onClear,
-  onSave,
+function AdminSessionLoadingPage({ storefront }: { storefront: StorefrontConfig }) {
+  return (
+    <main className="flex min-h-screen items-center justify-center bg-zinc-50 px-4 text-slate-950">
+      <section className="w-full max-w-md rounded-md border border-slate-200 bg-white p-6 shadow-panel">
+        <StoreBrand storefront={storefront} />
+        <div className="mt-8 flex items-center gap-3 text-sm text-slate-600">
+          <Loader2 className="animate-spin" size={20} />
+          正在检查管理员会话…
+        </div>
+      </section>
+    </main>
+  );
+}
+
+function AdminLoginPage({
+  onAuthenticated,
+  storefront,
 }: {
-  adminKey: string;
-  onClear: () => void;
-  onSave: (value: string) => void;
+  onAuthenticated: () => void;
+  storefront: StorefrontConfig;
 }) {
-  const [value, setValue] = useState(adminKey);
+  const [adminKey, setAdminKey] = useState('');
   const [showKey, setShowKey] = useState(false);
+  const [submitting, setSubmitting] = useState(false);
+  const [errorMessage, setErrorMessage] = useState('');
 
-  useEffect(() => {
-    setValue(adminKey);
-  }, [adminKey]);
-
-  function submit(event: FormEvent<HTMLFormElement>) {
+  async function submit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
-    onSave(value);
+    if (!adminKey) {
+      setErrorMessage('请输入管理员密钥');
+      return;
+    }
+
+    setSubmitting(true);
+    setErrorMessage('');
+    console.info('[管理员认证] 正在提交登录请求');
+    try {
+      const session = await loginAdmin(adminKey);
+      if (!session.authenticated) {
+        throw new Error('登录接口未建立管理员会话');
+      }
+      // 登录完成后尽快清掉组件内的密钥副本；后续请求只依赖 HttpOnly Cookie。
+      setAdminKey('');
+      console.info('[管理员认证] 登录成功，准备加载管理后台');
+      onAuthenticated();
+    } catch (error) {
+      console.warn('[管理员认证] 登录失败', {
+        status: error instanceof ApiError ? error.status : undefined,
+        error,
+      });
+      setErrorMessage(
+        error instanceof ApiError && error.status === 401
+          ? '管理员密钥错误'
+          : error instanceof Error
+            ? error.message
+            : '登录失败，请稍后重试',
+      );
+    } finally {
+      setSubmitting(false);
+    }
   }
 
   return (
-    <form className="w-full sm:w-[440px]" onSubmit={submit}>
-      <label className="block">
-        <div className="flex">
+    <main className="flex min-h-screen items-center justify-center bg-zinc-50 px-4 py-10 text-slate-950">
+      <section className="w-full max-w-md rounded-md border border-slate-200 bg-white p-6 shadow-panel">
+        <StoreBrand storefront={storefront} />
+        <div className="mt-8">
+          <h1 className="text-xl font-semibold">登录管理后台</h1>
+          <p className="mt-2 text-sm text-slate-500">请输入部署环境中配置的管理员密钥。</p>
+        </div>
+
+        <form className="mt-6" onSubmit={(event) => void submit(event)}>
+          <label className="block" htmlFor="admin-key">
+            <span className="text-sm font-medium text-slate-700">管理员密钥</span>
+          </label>
+          <div className="mt-2 flex">
           <input
-            className="h-10 min-w-0 flex-1 rounded-l-md border border-slate-300 px-3 text-sm outline-none focus:border-slate-950"
-            onChange={(event) => setValue(event.target.value)}
+            autoComplete="current-password"
+            autoFocus
+            className="h-11 min-w-0 flex-1 rounded-l-md border border-slate-300 px-3 text-sm outline-none focus:border-slate-950"
+            disabled={submitting}
+            id="admin-key"
+            name="admin-key"
+            onChange={(event) => setAdminKey(event.target.value)}
             type={showKey ? 'text' : 'password'}
-            value={value}
+            value={adminKey}
           />
           <button
-            className="inline-flex h-10 w-10 items-center justify-center border-y border-r border-slate-300 bg-white text-slate-600 hover:text-slate-950"
+            aria-label={showKey ? '隐藏管理员密钥' : '显示管理员密钥'}
+            className="inline-flex h-11 w-11 items-center justify-center rounded-r-md border-y border-r border-slate-300 bg-white text-slate-600 hover:text-slate-950"
             onClick={() => setShowKey((current) => !current)}
             type="button"
           >
             {showKey ? <EyeOff size={18} /> : <Eye size={18} />}
           </button>
+          </div>
+          {errorMessage && (
+            <p className="mt-3 rounded-md border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-700" role="alert">
+              {errorMessage}
+            </p>
+          )}
           <button
-            className="inline-flex h-10 items-center gap-2 border-y border-r border-slate-300 bg-slate-950 px-3 text-sm font-medium text-white"
+            className="mt-5 inline-flex h-11 w-full items-center justify-center gap-2 rounded-md bg-slate-950 px-4 text-sm font-medium text-white disabled:cursor-wait disabled:bg-slate-400"
+            disabled={submitting}
             type="submit"
           >
-            <ShieldCheck size={17} />
-            保存
+            {submitting ? <Loader2 className="animate-spin" size={18} /> : <ShieldCheck size={18} />}
+            登录
           </button>
           <button
-            className="h-10 rounded-r-md border-y border-r border-slate-300 bg-white px-3 text-sm font-medium text-slate-700 hover:text-slate-950"
-            onClick={onClear}
+            className="mt-3 h-10 w-full rounded-md border border-slate-300 bg-white px-3 text-sm font-medium text-slate-700 hover:border-slate-500"
+            onClick={() => (window.location.href = '/')}
             type="button"
           >
-            清除
+            返回商城
           </button>
-        </div>
-      </label>
-    </form>
+        </form>
+      </section>
+    </main>
   );
 }
 
 function ProductInfoCatalogPanel({
-  adminKey,
   loading,
   onCreated,
   onError,
   onStatusChanged,
   productOptions,
 }: {
-  adminKey: string;
   loading: boolean;
   onCreated: (info: AdminProductInfo) => void;
   onError: (message: string | null) => void;
@@ -684,17 +762,12 @@ function ProductInfoCatalogPanel({
   }, [page, totalPages]);
 
   async function toggleProductActive(product: ProductOption) {
-    if (!adminKey.trim()) {
-      onError('请先保存管理员密钥');
-      return;
-    }
-
     const active = !product.active;
     setUpdatingProductInfoId(product.id);
     onError(null);
 
     try {
-      const info = await updateProductInfoActive(adminKey.trim(), product.id, { active });
+      const info = await updateProductInfoActive(product.id, { active });
       onStatusChanged(info);
     } catch (err) {
       onError(err instanceof Error ? err.message : active ? '上架商品信息失败' : '下架商品信息失败');
@@ -752,9 +825,6 @@ function ProductInfoCatalogPanel({
         ))}
       </div>
 
-      {productOptions.length === 0 && !loading && (
-        <p className="mt-4 rounded-md border border-slate-200 bg-white px-3 py-2 text-sm text-slate-500">暂无商品信息</p>
-      )}
       {productOptions.length > 0 && filteredProductOptions.length === 0 && !loading && (
         <p className="mt-4 rounded-md border border-slate-200 bg-white px-3 py-2 text-sm text-slate-500">
           暂无上架商品信息，勾选“全部”可查看下架商品。
@@ -763,7 +833,6 @@ function ProductInfoCatalogPanel({
 
       {showCreateModal && (
         <ProductInfoModal
-          adminKey={adminKey}
           onClose={() => setShowCreateModal(false)}
           onCreated={(info) => {
             setPage(1);
@@ -835,12 +904,10 @@ function ProductInfoCard({
 }
 
 function ProductInfoModal({
-  adminKey,
   onClose,
   onCreated,
   onError,
 }: {
-  adminKey: string;
   onClose: () => void;
   onCreated: (info: AdminProductInfo) => void;
   onError: (message: string | null) => void;
@@ -850,11 +917,6 @@ function ProductInfoModal({
 
   async function submit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
-    if (!adminKey.trim()) {
-      onError('请先保存管理员密钥');
-      return;
-    }
-
     const payload = await safeBuildProductInfoPayload(form, onError);
     if (!payload) {
       return;
@@ -864,7 +926,7 @@ function ProductInfoModal({
     onError(null);
 
     try {
-      const info = await createProductInfo(adminKey.trim(), payload);
+      const info = await createProductInfo(payload);
       onCreated(info);
       revokePreviewUrl(form);
       onClose();
@@ -1029,7 +1091,6 @@ function ProductInfoFields({
 }
 
 function InventoryProductsPanel({
-  adminKey,
   filters,
   loading,
   onFiltersChange,
@@ -1045,7 +1106,6 @@ function InventoryProductsPanel({
   products,
   total,
 }: {
-  adminKey: string;
   filters: InventoryFilters;
   loading: boolean;
   onFiltersChange: (filters: InventoryFilters) => void;
@@ -1093,16 +1153,11 @@ function InventoryProductsPanel({
       onError('请先选择库存商品');
       return;
     }
-    if (!adminKey.trim()) {
-      onError('请先保存管理员密钥');
-      return;
-    }
-
     setUpdatingStatus(status);
     onError(null);
 
     try {
-      const result = await updateAdminProductStatuses(adminKey.trim(), {
+      const result = await updateAdminProductStatuses({
         product_ids: productIds,
         status,
       });
@@ -1281,7 +1336,6 @@ function InventoryProductsPanel({
       />
       {showCreateModal && (
         <StockCreateModal
-          adminKey={adminKey}
           initialProductInfoId={filters.productInfoId}
           onClose={() => setShowCreateModal(false)}
           onCreated={(result) => {
@@ -1381,14 +1435,12 @@ function OffsetPaginationControls({
 }
 
 function StockCreateModal({
-  adminKey,
   initialProductInfoId,
   onClose,
   onCreated,
   onError,
   productOptions,
 }: {
-  adminKey: string;
   initialProductInfoId: string;
   onClose: () => void;
   onCreated: (result: CreateAdminProductResult) => void;
@@ -1412,10 +1464,6 @@ function StockCreateModal({
     event.preventDefault();
     const contents = splitInventoryContents(content, separator);
 
-    if (!adminKey.trim()) {
-      onError('请先保存管理员密钥');
-      return;
-    }
     if (!productInfoId) {
       onError('请选择商品信息');
       return;
@@ -1436,7 +1484,7 @@ function StockCreateModal({
     });
 
     try {
-      const createdProducts = await createAdminProduct(adminKey.trim(), {
+      const createdProducts = await createAdminProduct({
         product_info_id: productInfoId,
         contents,
       });
@@ -1739,18 +1787,6 @@ function ApiCallLogsPanel({
         total={total}
       />
     </section>
-  );
-}
-
-function MetricCard({ icon, label, value }: { icon: ReactNode; label: string; value: string }) {
-  return (
-    <div className="rounded-md border border-slate-200 bg-white p-4 shadow-panel">
-      <div className="flex items-center justify-between gap-3">
-        <p className="text-sm text-slate-500">{label}</p>
-        <span className="text-slate-500">{icon}</span>
-      </div>
-      <p className="mt-3 text-2xl font-semibold">{value}</p>
-    </div>
   );
 }
 

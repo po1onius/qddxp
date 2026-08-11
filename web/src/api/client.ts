@@ -25,6 +25,17 @@ import type {
 const DEFAULT_API_BASE_URL = '/api';
 const configuredApiBaseUrl = (import.meta.env.VITE_API_BASE_URL ?? '').trim();
 const API_BASE_URL = (configuredApiBaseUrl || DEFAULT_API_BASE_URL).replace(/\/+$/, '');
+export const ADMIN_SESSION_EXPIRED_EVENT = 'qddxp:admin-session-expired';
+
+export class ApiError extends Error {
+  readonly status: number;
+
+  constructor(message: string, status: number) {
+    super(message);
+    this.name = 'ApiError';
+    this.status = status;
+  }
+}
 
 function apiUrl(path: string): string {
   const normalizedPath = path.startsWith('/') ? path : `/${path}`;
@@ -34,6 +45,9 @@ function apiUrl(path: string): string {
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
   const response = await fetch(apiUrl(path), {
     ...init,
+    // 生产环境和 Vite 开发代理均为同源请求。显式声明凭据策略，确保管理员的
+    // HttpOnly 会话 Cookie 会随管理 API 请求发送，同时不会泄露给跨域地址。
+    credentials: 'same-origin',
     headers: {
       'Content-Type': 'application/json',
       ...init?.headers,
@@ -42,7 +56,11 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
 
   if (!response.ok) {
     const body = await response.json().catch(() => ({}));
-    throw new Error(body.error ?? `请求失败: ${response.status}`);
+    throw new ApiError(body.error ?? `请求失败: ${response.status}`, response.status);
+  }
+
+  if (response.status === 204) {
+    return undefined as T;
   }
 
   return response.json() as Promise<T>;
@@ -123,85 +141,95 @@ export function listOrdersByContact(input: ListOrdersByContactInput): Promise<Of
   });
 }
 
-function adminHeaders(adminKey: string) {
-  return {
-    'x-admin-key': adminKey,
-  };
+export type AdminSessionStatus = {
+  authenticated: boolean;
+};
+
+export function getAdminSession(): Promise<AdminSessionStatus> {
+  return request<AdminSessionStatus>('/admin/session');
 }
 
-export function createProductInfo(adminKey: string, input: CreateProductInfoInput): Promise<AdminProductInfo> {
-  return request<AdminProductInfo>('/admin/product-info', {
+export function loginAdmin(adminKey: string): Promise<AdminSessionStatus> {
+  return request<AdminSessionStatus>('/admin/session', {
     method: 'POST',
-    headers: adminHeaders(adminKey),
+    body: JSON.stringify({ admin_key: adminKey }),
+  });
+}
+
+export function logoutAdmin(): Promise<void> {
+  return request<void>('/admin/session', { method: 'DELETE' });
+}
+
+async function adminRequest<T>(path: string, init?: RequestInit): Promise<T> {
+  try {
+    return await request<T>(path, init);
+  } catch (error) {
+    if (error instanceof ApiError && error.status === 401) {
+      // 会话可能在页面停留期间因空闲而过期。统一发布事件，使管理页立即卸载敏感
+      // 数据并返回登录表单，避免每个业务组件各自维护一套过期处理分支。
+      window.dispatchEvent(new Event(ADMIN_SESSION_EXPIRED_EVENT));
+      throw new ApiError('管理员会话已失效，请重新登录', 401);
+    }
+    throw error;
+  }
+}
+
+export function createProductInfo(input: CreateProductInfoInput): Promise<AdminProductInfo> {
+  return adminRequest<AdminProductInfo>('/admin/product-info', {
+    method: 'POST',
     body: JSON.stringify(input),
   });
 }
 
-export function listAdminProductInfo(adminKey: string): Promise<AdminProductInfo[]> {
-  return request<AdminProductInfo[]>('/admin/product-info', {
-    headers: adminHeaders(adminKey),
-  });
+export function listAdminProductInfo(): Promise<AdminProductInfo[]> {
+  return adminRequest<AdminProductInfo[]>('/admin/product-info');
 }
 
 export function updateProductInfoActive(
-  adminKey: string,
   productInfoId: string,
   input: UpdateProductInfoActiveInput,
 ): Promise<AdminProductInfo> {
-  return request<AdminProductInfo>(`/admin/product-info/${productInfoId}/active`, {
+  return adminRequest<AdminProductInfo>(`/admin/product-info/${productInfoId}/active`, {
     method: 'PATCH',
-    headers: adminHeaders(adminKey),
     body: JSON.stringify(input),
   });
 }
 
-export function createAdminProduct(adminKey: string, input: CreateAdminProductInput): Promise<CreateAdminProductResult> {
-  return request<CreateAdminProductResult>('/admin/products', {
+export function createAdminProduct(input: CreateAdminProductInput): Promise<CreateAdminProductResult> {
+  return adminRequest<CreateAdminProductResult>('/admin/products', {
     method: 'POST',
-    headers: adminHeaders(adminKey),
     body: JSON.stringify(input),
   });
 }
 
 export function updateAdminProductStatuses(
-  adminKey: string,
   input: UpdateAdminProductStatusInput,
 ): Promise<UpdateAdminProductStatusResult> {
-  return request<UpdateAdminProductStatusResult>('/admin/products/status', {
+  return adminRequest<UpdateAdminProductStatusResult>('/admin/products/status', {
     method: 'PATCH',
-    headers: adminHeaders(adminKey),
     body: JSON.stringify(input),
   });
 }
 
 export function listAdminProducts(
-  adminKey: string,
   params: AdminProductPageParams = {},
 ): Promise<OffsetPageResponse<AdminInventoryProduct>> {
-  return request<OffsetPageResponse<AdminInventoryProduct>>(
+  return adminRequest<OffsetPageResponse<AdminInventoryProduct>>(
     withQuery('/admin/products', {
       page: params.page,
       page_size: params.page_size,
       product_info_id: params.product_info_id,
       status: params.status,
     }),
-    {
-      headers: adminHeaders(adminKey),
-    },
   );
 }
 
-export function listAdminOrders(adminKey: string, params: ProductPageParams = {}): Promise<OffsetPageResponse<AdminOrder>> {
-  return request<OffsetPageResponse<AdminOrder>>(withQuery('/admin/orders', params), {
-    headers: adminHeaders(adminKey),
-  });
+export function listAdminOrders(params: ProductPageParams = {}): Promise<OffsetPageResponse<AdminOrder>> {
+  return adminRequest<OffsetPageResponse<AdminOrder>>(withQuery('/admin/orders', params));
 }
 
 export function listAdminApiCallLogs(
-  adminKey: string,
   params: ProductPageParams = {},
 ): Promise<OffsetPageResponse<AdminApiCallLog>> {
-  return request<OffsetPageResponse<AdminApiCallLog>>(withQuery('/admin/api-call-logs', params), {
-    headers: adminHeaders(adminKey),
-  });
+  return adminRequest<OffsetPageResponse<AdminApiCallLog>>(withQuery('/admin/api-call-logs', params));
 }

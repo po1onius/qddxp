@@ -22,6 +22,8 @@ pub enum AppError {
     Database(#[from] diesel::result::Error),
     #[error("connection pool error")]
     Pool(#[from] diesel_async::pooled_connection::bb8::RunError),
+    #[error("session error")]
+    Session(#[from] tower_sessions::session::Error),
 }
 
 impl IntoResponse for AppError {
@@ -35,7 +37,7 @@ impl IntoResponse for AppError {
             Self::Database(diesel::result::Error::NotFound) => {
                 (StatusCode::NOT_FOUND, "resource not found".to_string())
             }
-            error @ (Self::Database(_) | Self::Pool(_)) => {
+            error @ (Self::Database(_) | Self::Pool(_) | Self::Session(_)) => {
                 tracing::error!(error = ?error, "internal error");
                 (
                     StatusCode::INTERNAL_SERVER_ERROR,

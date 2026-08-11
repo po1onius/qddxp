@@ -11,7 +11,7 @@
 - 按联系方式查询历史订单列表
 - 易支付（epay）网关与微信支付官方 API v3 Native 在线支付，支付后自动分配卡密并展示
 
-**管理后台**（`/a-dmin`，凭 `ADMIN_KEY` 访问）
+**管理后台**（`/admin`，使用 `ADMIN_KEY` 登录）
 - 商品信息（SPU）管理：价格、开关状态
 - 库存（卡密）管理：批量导入、状态调整、筛选分页
 - 订单管理：列表、状态跟踪
@@ -35,7 +35,7 @@
 
 后端直接托管前端构建产物（`web/dist`），前后端同源部署。
 
-顾客端页面使用独立前端路由：商城 `/`、创建订单 `/orders/new/:productId`、订单查询 `/orders`；管理后台使用 `/a-dmin`。
+顾客端页面使用独立前端路由：商城 `/`、创建订单 `/orders/new/:productId`、订单查询 `/orders`；管理后台使用 `/admin`。管理员密钥只在登录时提交，登录成功后通过服务端会话和 `HttpOnly` Cookie 认证管理 API。
 
 ## 目录结构
 
@@ -87,7 +87,7 @@ docker compose -f deploy/compose.yml up -d --build
 | --- | --- | --- |
 | `DATABASE_URL` | 是 | PostgreSQL 连接串 |
 | `WEB_DIST_DIR` | 是 | 前端静态文件目录 |
-| `ADMIN_KEY` | 是 | 管理后台密钥（请求头 `x-admin-key`） |
+| `ADMIN_KEY` | 是 | 管理后台登录密钥；仅在登录时提交，不保存在浏览器存储中 |
 | `LISTEN_ADDR` | 否 | 监听地址，默认 `0.0.0.0:3000` |
 | `PUBLIC_BASE_URL` | 否 | 对外基础 URL，用于支付回调地址拼接 |
 | `WEB_RETURN_URL` | 否 | 支付成功后的回跳页面，应指向前端订单查询路由 `/orders` |
@@ -112,6 +112,18 @@ docker compose -f deploy/compose.yml up -d --build
 `WXPAY_MERCHANT_PRIVATE_KEY_FILE`、`WXPAY_PUBLIC_KEY_FILE`。Compose 分别把它们
 只读映射到 Dockerfile 预设的容器路径，不再挂载整个目录，也无需配置容器内路径。
 应用启动时会解析 Logo 内容并确认其为 SVG，而不是信任文件扩展名。
+
+### 管理后台会话
+
+访问 `/admin` 后使用 `ADMIN_KEY` 登录。登录成功后，浏览器只保存服务端签发的
+`HttpOnly`、`SameSite=Strict` 会话 Cookie；管理 API 不再接受 `x-admin-key` 请求头。
+会话空闲 30 分钟后自动失效，每次有效的管理请求会续期。会话使用应用进程内的
+Moka 存储，因此不需要额外部署 Redis 或新增数据库表；应用重启或切换到其他实例后
+需要重新登录。当前部署形态是单个应用实例，若以后扩展为多实例，应改为共享会话存储。
+
+当 `PUBLIC_BASE_URL` 使用 HTTPS 时，会话 Cookie 自动启用 `Secure`。生产环境必须把
+该变量配置为实际的 HTTPS 对外地址；本地 HTTP 开发会关闭 `Secure` 并在启动日志中
+给出明确警告。
 
 ### 微信支付官方直连配置
 
