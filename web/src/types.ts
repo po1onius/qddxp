@@ -42,12 +42,6 @@ export type AdminProductStatus = 'available' | 'disabled';
 
 export type ProductInventoryStatus = 'available' | 'reserved' | 'delivered' | 'disabled';
 
-export type OrderAllocationMode = 'reserve_on_create' | 'allocate_on_pay';
-
-export type OrderAllocationModeResult = {
-  order_allocation_mode: OrderAllocationMode;
-};
-
 export type CreateAdminProductInput = {
   product_info_id: string;
   contents: string[];
@@ -55,7 +49,6 @@ export type CreateAdminProductInput = {
 
 export type CreateAdminProductResult = {
   items: AdminProduct[];
-  assigned_preorders: number;
   stocked: number;
 };
 
@@ -132,7 +125,7 @@ export type ListOrdersByContactInput = {
   page_size?: number;
 };
 
-export type OrderStatus = 'pending' | 'paid' | 'preorder' | 'expired' | 'cancelled';
+export type OrderStatus = 'pending' | 'paid' | 'expired' | 'cancelled';
 
 export type ReconcilePaymentResult = {
   status: OrderStatus;
@@ -145,6 +138,7 @@ export type OrderSummary = {
   product_name: string;
   price_cents: number;
   status: OrderStatus;
+  paid_at: string | null;
   created_at: string;
 };
 
@@ -153,6 +147,7 @@ export type OrderDetail = {
   product_info_id: string;
   product_name: string;
   status: OrderStatus;
+  paid_at: string | null;
   contact: string;
   created_at: string;
   content: string | null;

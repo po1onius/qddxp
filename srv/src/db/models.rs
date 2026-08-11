@@ -5,7 +5,7 @@ use serde_json::Value;
 use uuid::Uuid;
 
 use crate::db::schema::{
-    api_call_logs, orders, payment_attempts, payment_events, product_info, products, site_settings,
+    api_call_logs, orders, payment_attempts, payment_events, product_info, products,
 };
 
 #[derive(Debug, Clone, Queryable, Identifiable, Serialize)]
@@ -155,12 +155,4 @@ pub struct NewPaymentEvent<'a> {
     pub request_body: &'a str,
     pub success: bool,
     pub error_message: Option<&'a str>,
-}
-
-#[derive(Debug, Clone, Queryable, Identifiable, Serialize)]
-#[diesel(table_name = site_settings)]
-pub struct SiteSettings {
-    pub id: bool,
-    pub order_allocation_mode: String,
-    pub updated_at: DateTime<Utc>,
 }

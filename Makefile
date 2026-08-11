@@ -17,7 +17,7 @@ WEB_RETURN_URL ?= http://localhost:$(API_PORT)/delivery
 WEB_DIST_DIR ?= $(CURDIR)/web/dist
 ADMIN_KEY ?= change-me
 ORDER_PASSWORD_PEPPER ?= dev-insecure-change-me
-PAYMENT_EXPIRE_MINUTES ?= 15
+WXPAY_EXPIRE_MINUTES ?= 15
 RUST_LOG ?= info
 
 EPAY_GATEWAY ?=
@@ -48,7 +48,7 @@ srv: db-up web-build ## Start the backend with local development environment var
 		WEB_DIST_DIR='$(WEB_DIST_DIR)' \
 		ADMIN_KEY='$(ADMIN_KEY)' \
 		ORDER_PASSWORD_PEPPER='$(ORDER_PASSWORD_PEPPER)' \
-		PAYMENT_EXPIRE_MINUTES='$(PAYMENT_EXPIRE_MINUTES)' \
+		WXPAY_EXPIRE_MINUTES='$(WXPAY_EXPIRE_MINUTES)' \
 		RUST_LOG='$(RUST_LOG)' \
 		EPAY_GATEWAY='$(EPAY_GATEWAY)' \
 		EPAY_PID='$(EPAY_PID)' \

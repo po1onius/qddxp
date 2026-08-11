@@ -104,17 +104,6 @@ diesel::table! {
     }
 }
 
-diesel::table! {
-    use diesel::sql_types::*;
-    use diesel::sql_types::Timestamptz;
-
-    site_settings (id) {
-        id -> Bool,
-        order_allocation_mode -> Text,
-        updated_at -> Timestamptz,
-    }
-}
-
 diesel::allow_tables_to_appear_in_same_query!(
     api_call_logs,
     orders,
@@ -122,5 +111,4 @@ diesel::allow_tables_to_appear_in_same_query!(
     payment_events,
     product_info,
     products,
-    site_settings,
 );

@@ -9,7 +9,7 @@ use crate::{
         pool::DbPool,
         schema::{orders, payment_attempts, payment_events, products},
     },
-    domain::{OrderStatus, PaymentAttemptState, PaymentChannel, PaymentProvider, ProductStatus},
+    domain::{OrderStatus, PaymentAttemptState, PaymentProvider, ProductStatus},
     error::AppError,
 };
 
@@ -31,6 +31,8 @@ pub struct PaymentConfirmation<'a> {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ConfirmPaymentOutcome {
     Applied,
+    /// 支付发生在库存预占超时之后，仅记录支付事实，不交付库存。
+    RecordedAfterExpiry,
     AlreadyApplied,
 }
 
@@ -98,13 +100,8 @@ pub async fn confirm_payment(
             return Ok(ConfirmPaymentOutcome::AlreadyApplied);
         }
 
-        let migrated_legacy_success = attempt.provider == PaymentProvider::Epay.as_ref()
-            && attempt.channel == PaymentChannel::Legacy.as_ref()
-            && attempt.state == PaymentAttemptState::Succeeded.as_ref()
-            && attempt.provider_transaction_id.is_none();
-        if (attempt.amount_cents != confirmation.amount_cents
-            || attempt.currency != confirmation.currency)
-            && !migrated_legacy_success
+        if attempt.amount_cents != confirmation.amount_cents
+            || attempt.currency != confirmation.currency
         {
             tracing::warn!(
                 payment_attempt_id = %attempt.id,
@@ -116,53 +113,28 @@ pub async fn confirm_payment(
             );
             return Err(AppError::BadRequest("payment amount mismatch".to_string()));
         }
-        if migrated_legacy_success
-            && (attempt.amount_cents != confirmation.amount_cents
-                || attempt.currency != confirmation.currency)
-        {
-            // 旧表没有支付金额快照，只能用迁移时的商品现价回填。已交付订单重放通知时，
-            // 商品价格可能早已变化；此处只补全审计信息，绝不再次修改订单或库存。
-            tracing::warn!(
-                payment_attempt_id = %attempt.id,
-                migrated_amount_cents = attempt.amount_cents,
-                notified_amount_cents = confirmation.amount_cents,
-                "legacy succeeded ePay amount differs from migration snapshot"
-            );
-        }
 
         if attempt.state == PaymentAttemptState::Succeeded.as_ref() {
-            if let Some(stored_transaction_id) = attempt.provider_transaction_id.as_deref()
-                && stored_transaction_id != confirmation.provider_transaction_id
-            {
+            let stored_transaction_id =
+                attempt.provider_transaction_id.as_deref().ok_or_else(|| {
+                    tracing::error!(
+                        payment_attempt_id = %attempt.id,
+                        "succeeded payment attempt is missing provider transaction id"
+                    );
+                    AppError::Conflict(
+                        "succeeded payment is missing provider transaction id".to_string(),
+                    )
+                })?;
+            if stored_transaction_id != confirmation.provider_transaction_id {
                 tracing::error!(
                     payment_attempt_id = %attempt.id,
-                    stored_transaction_id = ?attempt.provider_transaction_id,
+                    stored_transaction_id,
                     received_transaction_id = confirmation.provider_transaction_id,
                     "payment attempt received a second provider transaction"
                 );
                 return Err(AppError::Conflict(
                     "payment already applied with another transaction".to_string(),
                 ));
-            }
-
-            // 旧版订单只保存了 ePay 商户单号，没有保存平台交易号。迁移后的成功记录会在
-            // 第一次重放通知时补齐平台交易号；支付尝试已被行锁保护，因此不会并发认领。
-            if attempt.provider_transaction_id.is_none() {
-                diesel::update(payment_attempts::table.filter(payment_attempts::id.eq(attempt.id)))
-                    .set((
-                        payment_attempts::provider_transaction_id
-                            .eq(Some(confirmation.provider_transaction_id)),
-                        payment_attempts::paid_at
-                            .eq(Some(attempt.paid_at.unwrap_or(confirmation.paid_at))),
-                        payment_attempts::updated_at.eq(Utc::now()),
-                    ))
-                    .execute(conn)
-                    .await?;
-                tracing::info!(
-                    payment_attempt_id = %attempt.id,
-                    provider_transaction_id = confirmation.provider_transaction_id,
-                    "legacy succeeded payment attempt enriched from verified notification"
-                );
             }
 
             insert_payment_event(conn, &attempt, &confirmation).await?;
@@ -189,11 +161,36 @@ pub async fn confirm_payment(
             ));
         }
 
-        if matches!(
-            order.status.as_str(),
-            status if status == OrderStatus::Paid.as_ref()
-                || status == OrderStatus::Preorder.as_ref()
-        ) {
+        let epay_paid_after_deadline = is_epay_paid_after_deadline(
+            &attempt.provider,
+            confirmation.paid_at,
+            attempt.expires_at,
+        );
+        if epay_paid_after_deadline && order.status == OrderStatus::Pending.as_ref() {
+            release_reserved_inventory_for_late_payment(conn, &order, attempt.id).await?;
+        }
+
+        if order.status == OrderStatus::Expired.as_ref() || epay_paid_after_deadline {
+            // 超时任务已经释放了库存。此后即使收到验签成功的支付通知，也只能记录收款事实；
+            // 禁止重新分配库存，否则同一条卡密可能已被另一张订单预占或交付。
+            diesel::update(orders::table.filter(orders::id.eq(order.id)))
+                .set(orders::paid_at.eq(Some(confirmation.paid_at)))
+                .execute(conn)
+                .await?;
+            mark_attempt_succeeded(conn, attempt.id, &confirmation).await?;
+            insert_payment_event(conn, &attempt, &confirmation).await?;
+            tracing::error!(
+                order_id = %order.id,
+                payment_attempt_id = %attempt.id,
+                provider = confirmation.provider,
+                provider_transaction_id = confirmation.provider_transaction_id,
+                paid_at = %confirmation.paid_at,
+                "payment received after inventory reservation expired; payment recorded without delivery"
+            );
+            return Ok(ConfirmPaymentOutcome::RecordedAfterExpiry);
+        }
+
+        if order.status == OrderStatus::Paid.as_ref() {
             tracing::error!(
                 order_id = %order.id,
                 payment_attempt_id = %attempt.id,
@@ -204,18 +201,20 @@ pub async fn confirm_payment(
                 "order already paid by another payment attempt".to_string(),
             ));
         }
+        if order.status != OrderStatus::Pending.as_ref() {
+            tracing::error!(
+                order_id = %order.id,
+                payment_attempt_id = %attempt.id,
+                order_status = %order.status,
+                "payment confirmation rejected for terminal order"
+            );
+            return Err(AppError::Conflict(
+                "order cannot accept payment in its current state".to_string(),
+            ));
+        }
 
         deliver_order_inventory(conn, &order, confirmation.paid_at).await?;
-        diesel::update(payment_attempts::table.filter(payment_attempts::id.eq(attempt.id)))
-            .set((
-                payment_attempts::provider_transaction_id
-                    .eq(Some(confirmation.provider_transaction_id)),
-                payment_attempts::state.eq(PaymentAttemptState::Succeeded.as_ref()),
-                payment_attempts::paid_at.eq(Some(confirmation.paid_at)),
-                payment_attempts::updated_at.eq(Utc::now()),
-            ))
-            .execute(conn)
-            .await?;
+        mark_attempt_succeeded(conn, attempt.id, &confirmation).await?;
         insert_payment_event(conn, &attempt, &confirmation).await?;
 
         tracing::info!(
@@ -229,6 +228,85 @@ pub async fn confirm_payment(
         Ok(ConfirmPaymentOutcome::Applied)
     })
     .await
+}
+
+fn is_epay_paid_after_deadline(
+    provider: &str,
+    paid_at: DateTime<Utc>,
+    expires_at: DateTime<Utc>,
+) -> bool {
+    provider == PaymentProvider::Epay.as_ref() && paid_at > expires_at
+}
+
+/// ePay 回调可能在三分钟截止后、后台扫描任务执行前到达。此时回调事务直接释放库存并
+/// 将订单置为过期，确保业务期限不受扫描间隔影响。
+async fn release_reserved_inventory_for_late_payment(
+    conn: &mut diesel_async::AsyncPgConnection,
+    order: &Order,
+    payment_attempt_id: Uuid,
+) -> Result<(), AppError> {
+    let product_id = order.product_id.ok_or_else(|| {
+        tracing::error!(
+            order_id = %order.id,
+            %payment_attempt_id,
+            "late ePay payment found pending order without reserved inventory"
+        );
+        AppError::Conflict("pending order is missing reserved inventory".to_string())
+    })?;
+    let updated = diesel::update(
+        products::table
+            .filter(products::id.eq(product_id))
+            .filter(products::product_info_id.eq(order.product_info_id))
+            .filter(products::status.eq(ProductStatus::Reserved.as_ref())),
+    )
+    .set(products::status.eq(ProductStatus::Available.as_ref()))
+    .execute(conn)
+    .await?;
+    if updated != 1 {
+        tracing::error!(
+            order_id = %order.id,
+            %payment_attempt_id,
+            %product_id,
+            updated,
+            "late ePay payment could not release reserved inventory"
+        );
+        return Err(AppError::Conflict(
+            "reserved inventory could not be released".to_string(),
+        ));
+    }
+
+    diesel::update(orders::table.filter(orders::id.eq(order.id)))
+        .set((
+            orders::status.eq(OrderStatus::Expired.as_ref()),
+            orders::product_id.eq(Option::<Uuid>::None),
+        ))
+        .execute(conn)
+        .await?;
+    tracing::warn!(
+        order_id = %order.id,
+        %payment_attempt_id,
+        %product_id,
+        "ePay payment arrived after deadline; reserved inventory released in callback transaction"
+    );
+    Ok(())
+}
+
+async fn mark_attempt_succeeded(
+    conn: &mut diesel_async::AsyncPgConnection,
+    attempt_id: Uuid,
+    confirmation: &PaymentConfirmation<'_>,
+) -> Result<(), AppError> {
+    diesel::update(payment_attempts::table.filter(payment_attempts::id.eq(attempt_id)))
+        .set((
+            payment_attempts::provider_transaction_id
+                .eq(Some(confirmation.provider_transaction_id)),
+            payment_attempts::state.eq(PaymentAttemptState::Succeeded.as_ref()),
+            payment_attempts::paid_at.eq(Some(confirmation.paid_at)),
+            payment_attempts::updated_at.eq(Utc::now()),
+        ))
+        .execute(conn)
+        .await?;
+    Ok(())
 }
 
 async fn insert_payment_event(
@@ -257,87 +335,77 @@ async fn deliver_order_inventory(
     order: &Order,
     paid_at: DateTime<Utc>,
 ) -> Result<(), AppError> {
-    let reserved_product = if let Some(product_id) = order.product_id {
-        products::table
-            .select((products::id, products::status))
-            .filter(products::id.eq(product_id))
-            .filter(products::product_info_id.eq(order.product_info_id))
-            .for_update()
-            .first::<(Uuid, String)>(conn)
-            .await
-            .optional()?
-    } else {
-        None
-    };
-
-    if let Some((product_id, product_status)) = reserved_product {
-        if product_status != ProductStatus::Reserved.as_ref() {
-            return Err(AppError::Conflict(
-                "reserved product is not available".to_string(),
-            ));
-        }
-        diesel::update(orders::table.filter(orders::id.eq(order.id)))
-            .set((
-                orders::status.eq(OrderStatus::Paid.as_ref()),
-                orders::paid_at.eq(Some(paid_at)),
-            ))
-            .execute(conn)
-            .await?;
-        diesel::update(products::table.filter(products::id.eq(product_id)))
-            .set(products::status.eq(ProductStatus::Delivered.as_ref()))
-            .execute(conn)
-            .await?;
-        tracing::info!(
-            order_id = %order.id,
-            product_id = %product_id,
-            "reserved inventory delivered"
-        );
-        return Ok(());
-    }
-
-    let product_id = products::table
-        .select(products::id)
+    let product_id = order.product_id.ok_or_else(|| {
+        tracing::error!(order_id = %order.id, "pending order is missing reserved inventory id");
+        AppError::Conflict("pending order is missing reserved inventory".to_string())
+    })?;
+    let product_status = products::table
+        .select(products::status)
+        .filter(products::id.eq(product_id))
         .filter(products::product_info_id.eq(order.product_info_id))
-        .filter(products::status.eq(ProductStatus::Available.as_ref()))
         .for_update()
-        .skip_locked()
-        .first::<Uuid>(conn)
+        .first::<String>(conn)
         .await
-        .optional()?;
-
-    if let Some(product_id) = product_id {
-        diesel::update(orders::table.filter(orders::id.eq(order.id)))
-            .set((
-                orders::status.eq(OrderStatus::Paid.as_ref()),
-                orders::paid_at.eq(Some(paid_at)),
-                orders::product_id.eq(Some(product_id)),
-            ))
-            .execute(conn)
-            .await?;
-        diesel::update(products::table.filter(products::id.eq(product_id)))
-            .set(products::status.eq(ProductStatus::Delivered.as_ref()))
-            .execute(conn)
-            .await?;
-        tracing::info!(
+        .optional()?
+        .ok_or_else(|| {
+            tracing::error!(order_id = %order.id, %product_id, "reserved inventory record is missing");
+            AppError::Conflict("reserved inventory record is missing".to_string())
+        })?;
+    if product_status != ProductStatus::Reserved.as_ref() {
+        tracing::error!(
             order_id = %order.id,
-            product_id = %product_id,
-            "available inventory allocated and delivered"
+            %product_id,
+            %product_status,
+            "reserved inventory is not in reserved state"
         );
-    } else {
-        let preorder_product_id = Uuid::new_v4();
-        diesel::update(orders::table.filter(orders::id.eq(order.id)))
-            .set((
-                orders::status.eq(OrderStatus::Preorder.as_ref()),
-                orders::paid_at.eq(Some(paid_at)),
-                orders::product_id.eq(Some(preorder_product_id)),
-            ))
-            .execute(conn)
-            .await?;
-        tracing::info!(
-            order_id = %order.id,
-            product_id = %preorder_product_id,
-            "paid order moved to preorder because inventory is unavailable"
-        );
+        return Err(AppError::Conflict(
+            "reserved inventory is not in reserved state".to_string(),
+        ));
     }
+
+    diesel::update(orders::table.filter(orders::id.eq(order.id)))
+        .set((
+            orders::status.eq(OrderStatus::Paid.as_ref()),
+            orders::paid_at.eq(Some(paid_at)),
+        ))
+        .execute(conn)
+        .await?;
+    diesel::update(products::table.filter(products::id.eq(product_id)))
+        .set(products::status.eq(ProductStatus::Delivered.as_ref()))
+        .execute(conn)
+        .await?;
+    tracing::info!(
+        order_id = %order.id,
+        %product_id,
+        "reserved inventory delivered"
+    );
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use chrono::Duration;
+
+    use super::*;
+
+    #[test]
+    fn only_epay_confirmed_after_deadline_is_locally_classified_as_late() {
+        let expires_at = Utc::now();
+
+        assert!(is_epay_paid_after_deadline(
+            PaymentProvider::Epay.as_ref(),
+            expires_at + Duration::milliseconds(1),
+            expires_at,
+        ));
+        assert!(!is_epay_paid_after_deadline(
+            PaymentProvider::Epay.as_ref(),
+            expires_at,
+            expires_at,
+        ));
+        assert!(!is_epay_paid_after_deadline(
+            PaymentProvider::Wechatpay.as_ref(),
+            expires_at + Duration::minutes(1),
+            expires_at,
+        ));
+    }
 }

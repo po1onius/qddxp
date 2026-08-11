@@ -25,10 +25,6 @@ pub fn router(state: AppState) -> Router {
     let api = Router::new()
         .route("/products", get(public::list_products))
         .route("/payment-methods", get(public::list_payment_methods))
-        .route(
-            "/order-allocation-mode",
-            get(public::get_order_allocation_mode),
-        )
         .route("/orders", post(public::create_order))
         .route("/orders/by-contact", post(public::list_orders_by_contact))
         .route("/orders/query", post(public::query_order))
@@ -58,10 +54,6 @@ pub fn router(state: AppState) -> Router {
             patch(admin::update_product_status),
         )
         .route("/admin/orders", get(admin::list_orders))
-        .route(
-            "/admin/order-allocation-mode",
-            get(admin::get_order_allocation_mode).patch(admin::update_order_allocation_mode),
-        )
         .route("/admin/api-call-logs", get(admin::list_api_call_logs))
         .fallback(api_not_found)
         .layer(

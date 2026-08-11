@@ -11,7 +11,8 @@ pub struct AppConfig {
     pub web_dist_dir: PathBuf,
     pub admin_key: String,
     pub order_password_pepper: String,
-    pub payment_expire_minutes: i64,
+    /// 微信官方 Native 支付结束时间。ePay 使用固定三分钟的本地库存预占期限，二者不能共用配置。
+    pub wechatpay_expire_minutes: i64,
     pub epay: Option<EpayConfig>,
     pub wechatpay: Option<WechatPayConfig>,
 }
@@ -63,14 +64,12 @@ impl AppConfig {
         let admin_key = required("ADMIN_KEY")?;
         let order_password_pepper = env::var("ORDER_PASSWORD_PEPPER")
             .unwrap_or_else(|_| "dev-insecure-change-me".to_string());
-        let payment_expire_minutes = env::var("PAYMENT_EXPIRE_MINUTES")
+        let wechatpay_expire_minutes = env::var("WXPAY_EXPIRE_MINUTES")
             .unwrap_or_else(|_| "15".to_string())
             .parse::<i64>()
             .ok()
             .filter(|minutes| (1..=120).contains(minutes))
-            .ok_or(ConfigError::InvalidPositiveInteger(
-                "PAYMENT_EXPIRE_MINUTES",
-            ))?;
+            .ok_or(ConfigError::InvalidPositiveInteger("WXPAY_EXPIRE_MINUTES"))?;
 
         let epay = match (
             optional_nonempty("EPAY_GATEWAY"),
@@ -144,7 +143,7 @@ impl AppConfig {
             web_dist_dir,
             admin_key,
             order_password_pepper,
-            payment_expire_minutes,
+            wechatpay_expire_minutes,
             epay,
             wechatpay,
         })

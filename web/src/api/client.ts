@@ -10,7 +10,6 @@ import type {
   CreateProductInfoInput,
   ListOrdersByContactInput,
   OffsetPageResponse,
-  OrderAllocationModeResult,
   PaymentMethod,
   ReconcilePaymentResult,
   OrderDetail,
@@ -76,10 +75,6 @@ export function listProductPage(params: ProductPageParams = {}): Promise<OffsetP
 export async function listProducts(): Promise<Product[]> {
   const page = await listProductPage({ page_size: 100 });
   return page.items;
-}
-
-export function getOrderAllocationMode(): Promise<OrderAllocationModeResult> {
-  return request<OrderAllocationModeResult>('/order-allocation-mode');
 }
 
 export function listPaymentMethods(): Promise<PaymentMethod[]> {
@@ -152,23 +147,6 @@ export function updateProductInfoActive(
 export function createAdminProduct(adminKey: string, input: CreateAdminProductInput): Promise<CreateAdminProductResult> {
   return request<CreateAdminProductResult>('/admin/products', {
     method: 'POST',
-    headers: adminHeaders(adminKey),
-    body: JSON.stringify(input),
-  });
-}
-
-export function getAdminOrderAllocationMode(adminKey: string): Promise<OrderAllocationModeResult> {
-  return request<OrderAllocationModeResult>('/admin/order-allocation-mode', {
-    headers: adminHeaders(adminKey),
-  });
-}
-
-export function updateAdminOrderAllocationMode(
-  adminKey: string,
-  input: OrderAllocationModeResult,
-): Promise<OrderAllocationModeResult> {
-  return request<OrderAllocationModeResult>('/admin/order-allocation-mode', {
-    method: 'PATCH',
     headers: adminHeaders(adminKey),
     body: JSON.stringify(input),
   });

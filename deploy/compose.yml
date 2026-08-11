@@ -28,7 +28,7 @@ services:
       WEB_RETURN_URL: ${WEB_RETURN_URL:-http://localhost:8080/delivery}
       ADMIN_KEY: ${ADMIN_KEY:-change-me}
       ORDER_PASSWORD_PEPPER: ${ORDER_PASSWORD_PEPPER:-change-this-in-production}
-      PAYMENT_EXPIRE_MINUTES: ${PAYMENT_EXPIRE_MINUTES:-15}
+      WXPAY_EXPIRE_MINUTES: ${WXPAY_EXPIRE_MINUTES:-15}
       RUST_LOG: ${RUST_LOG:-info}
       EPAY_GATEWAY: ${EPAY_GATEWAY:-}
       EPAY_PID: ${EPAY_PID:-}

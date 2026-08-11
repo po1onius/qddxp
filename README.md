@@ -15,11 +15,12 @@
 - 商品信息（SPU）管理：价格、开关状态
 - 库存（卡密）管理：批量导入、状态调整、筛选分页
 - 订单管理：列表、状态跟踪
-- 库存分配模式切换：下单预留 / 支付时分配
 - 支付回调 API 调用日志查询，便于排查支付异常
 
 **订单与库存**
-- 订单状态机：`pending` → `paid`（无库存时进入 `preorder` 预售）
+- 下单时必须预留真实库存；缺货时拒绝创建订单，不接受预购
+- 订单状态机：`pending` → `paid`；超时未支付进入 `expired`
+- ePay 固定预留库存 3 分钟；超时后到账只记录支付事实并提示联系管理员，不自动发货
 - 库存状态机：`available` → `reserved` → `delivered`（另有 `disabled` 下架）
 - 支付回调全链路校验：MD5 签名、商户 PID、金额与订单比对、重复通知幂等处理
 
@@ -87,7 +88,7 @@ docker compose -f deploy/compose.yml up -d --build
 | `PUBLIC_BASE_URL` | 否 | 对外基础 URL，用于支付回调地址拼接 |
 | `WEB_RETURN_URL` | 否 | 支付成功后的回跳页面 |
 | `ORDER_PASSWORD_PEPPER` | 否 | 订单密码哈希 pepper，生产环境务必修改 |
-| `PAYMENT_EXPIRE_MINUTES` | 否 | 支付订单有效分钟数，默认 15，范围 1–120 |
+| `WXPAY_EXPIRE_MINUTES` | 否 | 微信官方 Native 支付结束分钟数，默认 15，范围 1–120；ePay 固定为 3 分钟 |
 | `EPAY_GATEWAY` / `EPAY_PID` / `EPAY_KEY` | 否 | 三者都设置才启用易支付 |
 | `WXPAY_APP_ID` / `WXPAY_MCH_ID` | 否 | 微信支付官方直连的应用 ID 与直连商户号 |
 | `WXPAY_MERCHANT_SERIAL_NO` | 否 | 商户 API 证书序列号 |
@@ -122,6 +123,9 @@ docker compose -f deploy/compose.yml up -d --build
 - [微信支付 Native 支付通知](https://pay.weixin.qq.com/doc/v3/merchant/4012791882)
 - [微信支付 API v3 证书和密钥说明](https://pay.weixin.qq.com/doc/v3/merchant/4024350132)
 - [微信支付 API v3 官方 SDK](https://github.com/wechatpay-apiv3)
+
+## AGENTS
+项目暂时没有生产数据，归一到第一个migration即可，不需要新增
 
 ## License
 

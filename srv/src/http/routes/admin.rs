@@ -15,11 +15,10 @@ use crate::{
     AppState,
     config::AppConfig,
     db::{
-        models::{ApiCallLog, NewProduct, NewProductInfo, Order, Product, ProductInfo},
+        models::{ApiCallLog, NewProduct, NewProductInfo, Product, ProductInfo},
         schema::{api_call_logs, orders, payment_attempts, product_info, products},
-        settings::{load_order_allocation_mode, save_order_allocation_mode},
     },
-    domain::{OrderAllocationMode, OrderStatus, ProductStatus},
+    domain::{OrderStatus, ProductStatus},
     error::AppError,
     http::pagination::{OffsetPageResponse, OffsetPagination, normalize_offset_page},
     security::require_admin,
@@ -60,18 +59,7 @@ pub struct CreateProductRequest {
 #[derive(Debug, Serialize)]
 pub struct CreateProductResponse {
     pub items: Vec<Product>,
-    pub assigned_preorders: usize,
     pub stocked: usize,
-}
-
-#[derive(Debug, Serialize)]
-pub struct OrderAllocationModeResponse {
-    pub order_allocation_mode: String,
-}
-
-#[derive(Debug, Deserialize)]
-pub struct UpdateOrderAllocationModeRequest {
-    pub order_allocation_mode: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -263,58 +251,15 @@ async fn paid_order_counts(
         return Ok(HashMap::new());
     }
 
-    let paid_statuses = [OrderStatus::Paid.as_ref(), OrderStatus::Preorder.as_ref()];
     let counts = orders::table
         .filter(orders::product_info_id.eq_any(product_info_ids))
-        .filter(orders::status.eq_any(paid_statuses))
+        .filter(orders::status.eq(OrderStatus::Paid.as_ref()))
         .group_by(orders::product_info_id)
         .select((orders::product_info_id, count_star()))
         .load::<(Uuid, i64)>(conn)
         .await?;
 
     Ok(counts.into_iter().collect())
-}
-
-pub async fn get_order_allocation_mode(
-    State(state): State<AppState>,
-    headers: HeaderMap,
-) -> Result<Json<OrderAllocationModeResponse>, AppError> {
-    require_admin_for(&headers, state.config.as_ref(), "get_order_allocation_mode")?;
-
-    let mut conn = state.pool.get().await?;
-    let mode = load_order_allocation_mode(&mut conn).await?;
-
-    Ok(Json(OrderAllocationModeResponse {
-        order_allocation_mode: mode.as_ref().to_string(),
-    }))
-}
-
-pub async fn update_order_allocation_mode(
-    State(state): State<AppState>,
-    headers: HeaderMap,
-    Json(request): Json<UpdateOrderAllocationModeRequest>,
-) -> Result<Json<OrderAllocationModeResponse>, AppError> {
-    require_admin_for(
-        &headers,
-        state.config.as_ref(),
-        "update_order_allocation_mode",
-    )?;
-    let mode = request
-        .order_allocation_mode
-        .trim()
-        .parse::<OrderAllocationMode>()
-        .map_err(|_| AppError::BadRequest("unsupported order_allocation_mode".to_string()))?;
-
-    let mut conn = state.pool.get().await?;
-    let settings = save_order_allocation_mode(&mut conn, mode).await?;
-    tracing::info!(
-        order_allocation_mode = %settings.order_allocation_mode,
-        "admin updated order allocation mode"
-    );
-
-    Ok(Json(OrderAllocationModeResponse {
-        order_allocation_mode: settings.order_allocation_mode,
-    }))
 }
 
 pub async fn create_product(
@@ -333,7 +278,7 @@ pub async fn create_product(
     );
 
     let mut conn = state.pool.get().await?;
-    let (products, assigned_preorders, stocked) = conn
+    let products = conn
         .transaction::<_, AppError, _>(async move |conn| {
             product_info::table
                 .filter(product_info::id.eq(request.product_info_id))
@@ -342,77 +287,28 @@ pub async fn create_product(
                 .optional()?
                 .ok_or_else(|| AppError::NotFound("product info not found".to_string()))?;
 
-            let preorder_limit = contents.len() as i64;
-            let preorder_orders = orders::table
-                .filter(orders::product_info_id.eq(request.product_info_id))
-                .filter(orders::status.eq(OrderStatus::Preorder.as_ref()))
-                .order((
-                    orders::paid_at.asc(),
-                    orders::created_at.asc(),
-                    orders::id.asc(),
-                ))
-                .limit(preorder_limit)
-                .for_update()
-                .skip_locked()
-                .load::<Order>(conn)
-                .await?;
-            let assigned_preorders = preorder_orders.len();
-            let stocked = contents.len() - assigned_preorders;
-
-            let mut new_products = Vec::with_capacity(contents.len());
-            let mut missing_preorder_product_ids = Vec::new();
-            for (order, content) in preorder_orders.iter().zip(contents.iter()) {
-                let product_id = order.product_id.unwrap_or_else(|| {
-                    let product_id = Uuid::new_v4();
-                    missing_preorder_product_ids.push((order.id, product_id));
-                    product_id
-                });
-                new_products.push(NewProduct {
-                    id: product_id,
-                    product_info_id: request.product_info_id,
-                    content,
-                    status: ProductStatus::Delivered.as_ref(),
-                });
-            }
-            for content in contents.iter().skip(assigned_preorders) {
-                new_products.push(NewProduct {
+            // 补货只新增可售库存，不再扫描或自动履约任何历史订单。
+            let new_products = contents
+                .iter()
+                .map(|content| NewProduct {
                     id: Uuid::new_v4(),
                     product_info_id: request.product_info_id,
                     content,
                     status: ProductStatus::Available.as_ref(),
-                });
-            }
+                })
+                .collect::<Vec<_>>();
 
-            let products = diesel::insert_into(products::table)
+            diesel::insert_into(products::table)
                 .values(&new_products)
                 .get_results::<Product>(conn)
-                .await?;
-
-            if !preorder_orders.is_empty() {
-                let order_ids = preorder_orders
-                    .iter()
-                    .map(|order| order.id)
-                    .collect::<Vec<_>>();
-                diesel::update(orders::table.filter(orders::id.eq_any(order_ids)))
-                    .set(orders::status.eq(OrderStatus::Paid.as_ref()))
-                    .execute(conn)
-                    .await?;
-
-                for (order_id, product_id) in missing_preorder_product_ids {
-                    diesel::update(orders::table.filter(orders::id.eq(order_id)))
-                        .set(orders::product_id.eq(Some(product_id)))
-                        .execute(conn)
-                        .await?;
-                }
-            }
-
-            Ok((products, assigned_preorders, stocked))
+                .await
+                .map_err(Into::into)
         })
         .await?;
+    let stocked = products.len();
     tracing::info!(
         product_info_id = %request.product_info_id,
         created = products.len(),
-        assigned_preorders,
         stocked,
         "admin created inventory products"
     );
@@ -421,7 +317,6 @@ pub async fn create_product(
         StatusCode::CREATED,
         Json(CreateProductResponse {
             items: products,
-            assigned_preorders,
             stocked,
         }),
     ))

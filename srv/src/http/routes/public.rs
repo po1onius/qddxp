@@ -16,14 +16,14 @@ use crate::{
     db::{
         models::{NewOrder, NewPaymentAttempt, Order, PaymentAttempt, ProductInfo},
         schema::{orders, payment_attempts, product_info, products},
-        settings::load_order_allocation_mode,
     },
     domain::{
-        OrderAllocationMode, OrderStatus, PaymentAttemptState, PaymentChannel, PaymentProvider,
-        ProductStatus, validate_payment_method,
+        OrderStatus, PaymentAttemptState, PaymentChannel, PaymentProvider, ProductStatus,
+        validate_payment_method,
     },
     error::AppError,
     http::pagination::{OffsetPageResponse, OffsetPagination, normalize_offset_page},
+    payments::EPAY_RESERVATION_MINUTES,
     security::{hash_order_password, verify_order_password},
 };
 
@@ -80,11 +80,6 @@ pub struct PaymentMethodResponse {
     pub action_type: String,
 }
 
-#[derive(Debug, Serialize)]
-pub struct OrderAllocationModeResponse {
-    pub order_allocation_mode: String,
-}
-
 #[derive(Debug, Deserialize)]
 pub struct QueryOrderRequest {
     pub id: Uuid,
@@ -105,6 +100,7 @@ pub struct OrderSummaryResponse {
     pub product_name: String,
     pub price_cents: i64,
     pub status: String,
+    pub paid_at: Option<DateTime<Utc>>,
     pub created_at: DateTime<Utc>,
 }
 
@@ -114,6 +110,7 @@ pub struct OrderDetailResponse {
     pub product_info_id: Uuid,
     pub product_name: String,
     pub status: String,
+    pub paid_at: Option<DateTime<Utc>>,
     pub contact: String,
     pub created_at: DateTime<Utc>,
     pub content: Option<String>,
@@ -172,17 +169,6 @@ pub async fn list_products(
         page,
         page_size,
         total,
-    }))
-}
-
-pub async fn get_order_allocation_mode(
-    State(state): State<AppState>,
-) -> Result<Json<OrderAllocationModeResponse>, AppError> {
-    let mut conn = state.pool.get().await?;
-    let mode = load_order_allocation_mode(&mut conn).await?;
-
-    Ok(Json(OrderAllocationModeResponse {
-        order_allocation_mode: mode.as_ref().to_string(),
     }))
 }
 
@@ -246,10 +232,9 @@ async fn paid_order_counts(
         return Ok(HashMap::new());
     }
 
-    let paid_statuses = [OrderStatus::Paid.as_ref(), OrderStatus::Preorder.as_ref()];
     let counts = orders::table
         .filter(orders::product_info_id.eq_any(product_info_ids))
-        .filter(orders::status.eq_any(paid_statuses))
+        .filter(orders::status.eq(OrderStatus::Paid.as_ref()))
         .group_by(orders::product_info_id)
         .select((orders::product_info_id, count_star()))
         .load::<(Uuid, i64)>(conn)
@@ -312,7 +297,10 @@ pub async fn create_order(
     let password_hash =
         hash_order_password(&request.order_password, &state.config.order_password_pepper)?;
     let product_info_id = request.product_info_id;
-    let payment_expire_minutes = state.config.payment_expire_minutes;
+    let reservation_minutes = match payment_provider {
+        PaymentProvider::Epay => EPAY_RESERVATION_MINUTES,
+        PaymentProvider::Wechatpay => state.config.wechatpay_expire_minutes,
+    };
     tracing::info!(
         %product_info_id,
         payment_provider = payment_provider.as_ref(),
@@ -338,50 +326,37 @@ pub async fn create_order(
                 "active product info found for order"
             );
 
-            let allocation_mode = load_order_allocation_mode(conn).await?;
-            let product_id = match allocation_mode {
-                OrderAllocationMode::ReserveOnCreate => {
-                    let product_id = products::table
-                        .select(products::id)
-                        .filter(products::product_info_id.eq(product_info_id))
-                        .filter(products::status.eq(ProductStatus::Available.as_ref()))
-                        .for_update()
-                        .skip_locked()
-                        .first::<Uuid>(conn)
-                        .await
-                        .optional()?
-                        .ok_or_else(|| AppError::Conflict("product is out of stock".to_string()))?;
-                    tracing::info!(
-                        %product_info_id,
-                        %product_id,
-                        "available inventory product locked for order"
-                    );
+            // 所有订单都必须在创建事务内锁定一条真实库存；缺货时不创建订单，更不接受预购。
+            let product_id = products::table
+                .select(products::id)
+                .filter(products::product_info_id.eq(product_info_id))
+                .filter(products::status.eq(ProductStatus::Available.as_ref()))
+                .for_update()
+                .skip_locked()
+                .first::<Uuid>(conn)
+                .await
+                .optional()?
+                .ok_or_else(|| AppError::Conflict("product is out of stock".to_string()))?;
+            tracing::info!(
+                %product_info_id,
+                %product_id,
+                "available inventory product locked for order"
+            );
 
-                    diesel::update(products::table.filter(products::id.eq(product_id)))
-                        .set(products::status.eq(ProductStatus::Reserved.as_ref()))
-                        .execute(conn)
-                        .await?;
-
-                    Some(product_id)
-                }
-                OrderAllocationMode::AllocateOnPay => {
-                    tracing::info!(
-                        %product_info_id,
-                        "pay-time allocation order will be created without inventory product id"
-                    );
-                    None
-                }
-            };
+            diesel::update(products::table.filter(products::id.eq(product_id)))
+                .set(products::status.eq(ProductStatus::Reserved.as_ref()))
+                .execute(conn)
+                .await?;
 
             let order_id = Uuid::new_v4();
             let payment_attempt_id = Uuid::new_v4();
             // UUID 去掉连字符后恰好为 32 个合法字符，满足微信支付商户订单号限制。
             let merchant_trade_no = payment_attempt_id.simple().to_string();
-            let expires_at = Utc::now() + Duration::minutes(payment_expire_minutes);
+            let expires_at = Utc::now() + Duration::minutes(reservation_minutes);
             let order = diesel::insert_into(orders::table)
                 .values(&NewOrder {
                     id: order_id,
-                    product_id,
+                    product_id: Some(product_id),
                     product_info_id,
                     product_name_snapshot: &product_name,
                     amount_cents: product_price_cents,
@@ -410,9 +385,8 @@ pub async fn create_order(
             tracing::info!(
                 order_id = %order.id,
                 %product_info_id,
-                product_id = ?product_id,
+                %product_id,
                 status = %order.status,
-                allocation_mode = %allocation_mode.as_ref(),
                 "pending order created"
             );
 
@@ -440,8 +414,26 @@ pub async fn create_order(
                 &order.product_name_snapshot,
                 order.amount_cents,
                 payment_channel.as_ref(),
+            )
+            .expect("ePay configuration was checked before creating the order");
+            let mut conn = state.pool.get().await?;
+            diesel::update(
+                payment_attempts::table.filter(payment_attempts::id.eq(payment_attempt.id)),
+            )
+            .set((
+                payment_attempts::state.eq(PaymentAttemptState::Ready.as_ref()),
+                payment_attempts::updated_at.eq(Utc::now()),
+            ))
+            .execute(&mut conn)
+            .await?;
+            tracing::info!(
+                order_id = %order.id,
+                payment_attempt_id = %payment_attempt.id,
+                provider = payment_provider.as_ref(),
+                channel = payment_channel.as_ref(),
+                "ePay payment attempt is ready for redirect"
             );
-            (payment_url.map(|url| PaymentAction::Redirect { url }), None)
+            (Some(PaymentAction::Redirect { url: payment_url }), None)
         }
         PaymentProvider::Wechatpay => {
             let client = state
@@ -464,7 +456,7 @@ pub async fn create_order(
                         payment_attempts::table.filter(payment_attempts::id.eq(payment_attempt.id)),
                     )
                     .set((
-                        payment_attempts::state.eq(PaymentAttemptState::PrepayCreated.as_ref()),
+                        payment_attempts::state.eq(PaymentAttemptState::Ready.as_ref()),
                         payment_attempts::code_url.eq(Some(prepay.code_url.as_str())),
                         payment_attempts::updated_at.eq(Utc::now()),
                     ))
@@ -559,6 +551,7 @@ pub async fn list_orders_by_contact(
             orders::product_name_snapshot,
             orders::amount_cents,
             orders::status,
+            orders::paid_at,
             orders::created_at,
         ))
         .order((orders::created_at.desc(), orders::id.desc()))
@@ -630,6 +623,7 @@ pub async fn query_order(
         product_info_id: order.product_info_id,
         product_name: order.product_name_snapshot,
         status: order.status,
+        paid_at: order.paid_at,
         contact: order.contact,
         created_at: order.created_at,
         content,

@@ -1,19 +1,18 @@
 import { useEffect, useMemo, useState } from 'react';
 import type { FormEvent, ReactNode } from 'react';
-import { CheckCircle2, ChevronLeft, ChevronRight, ClipboardCheck, CreditCard, RefreshCcw, Search, X } from 'lucide-react';
+import { CheckCircle2, ChevronLeft, ChevronRight, ClipboardCheck, CreditCard, RefreshCcw, Search, TriangleAlert, X } from 'lucide-react';
 import QRCode from 'qrcode';
 import { AdminApp } from './AdminApp';
 import { useToast } from './Toast';
 import {
   createOrder,
-  getOrderAllocationMode,
   listOrdersByContact,
   listPaymentMethods,
   listProductPage,
   queryOrder,
   reconcileWechatPayOrder,
 } from './api/client';
-import type { CreateOrderResult, OrderAllocationMode, OrderDetail, OrderSummary, PaymentMethod, Product } from './types';
+import type { CreateOrderResult, OrderDetail, OrderSummary, PaymentMethod, Product } from './types';
 
 type View = 'catalog' | 'checkout' | 'delivery';
 type PaymentReturnState =
@@ -114,7 +113,6 @@ function ShopApp() {
   const [productTotal, setProductTotal] = useState(0);
   const [selectedProduct, setSelectedProduct] = useState<Product | null>(null);
   const [detailsProduct, setDetailsProduct] = useState<Product | null>(null);
-  const [orderAllocationMode, setOrderAllocationMode] = useState<OrderAllocationMode>('reserve_on_create');
   const [paymentMethods, setPaymentMethods] = useState<PaymentMethod[]>([]);
   const [loadingProducts, setLoadingProducts] = useState(true);
 
@@ -122,20 +120,8 @@ function ShopApp() {
     void refreshProducts();
   }, []);
 
-  async function refreshOrderAllocationMode() {
-    try {
-      const response = await getOrderAllocationMode();
-      setOrderAllocationMode(response.order_allocation_mode);
-    } catch (error) {
-      showToast({
-        message: error instanceof Error ? error.message : '下单方式加载失败',
-        type: 'error',
-      });
-    }
-  }
-
   async function refreshProducts() {
-    await Promise.all([refreshOrderAllocationMode(), refreshPaymentMethods(), loadProductPage(productPage)]);
+    await Promise.all([refreshPaymentMethods(), loadProductPage(productPage)]);
   }
 
   async function refreshPaymentMethods() {
@@ -200,7 +186,6 @@ function ShopApp() {
               onOpenDetails={setDetailsProduct}
               onPageChange={(page) => void loadProductPage(page)}
               onRefresh={refreshProducts}
-              orderAllocationMode={orderAllocationMode}
               page={productPage}
               pageSize={PRODUCT_PAGE_SIZE}
               products={products}
@@ -233,7 +218,6 @@ function ShopApp() {
           <ProductDetailsModal
             onCheckout={openCheckout}
             onClose={() => setDetailsProduct(null)}
-            orderAllocationMode={orderAllocationMode}
             product={detailsProduct}
           />
       )}
@@ -277,7 +261,6 @@ function CatalogPage({
   onOpenDetails,
   onPageChange,
   onRefresh,
-  orderAllocationMode,
   page,
   pageSize,
   products,
@@ -288,7 +271,6 @@ function CatalogPage({
   onOpenDetails: (product: Product) => void;
   onPageChange: (page: number) => void;
   onRefresh: () => Promise<void>;
-  orderAllocationMode: OrderAllocationMode;
   page: number;
   pageSize: number;
   products: Product[];
@@ -343,7 +325,6 @@ function CatalogPage({
               product={product as Product}
               onCheckout={onCheckout}
               onOpenDetails={onOpenDetails}
-              orderAllocationMode={orderAllocationMode}
             />
           ),
         )}
@@ -355,16 +336,13 @@ function CatalogPage({
 function ProductCard({
   onCheckout,
   onOpenDetails,
-  orderAllocationMode,
   product,
 }: {
   onCheckout: (product: Product) => void;
   onOpenDetails: (product: Product) => void;
-  orderAllocationMode: OrderAllocationMode;
   product: Product;
 }) {
-  const canPreorder = orderAllocationMode === 'allocate_on_pay' && product.stock <= 0;
-  const soldOut = product.stock <= 0 && !canPreorder;
+  const soldOut = product.stock <= 0;
   const imageSrc = imageBase64Src(product.image_base64);
 
   return (
@@ -395,7 +373,7 @@ function ProductCard({
           type="button"
         >
           <CreditCard size={18} />
-          {soldOut ? '暂时无货' : canPreorder ? '预购' : '购买'}
+          {soldOut ? '暂时无货' : '购买'}
         </button>
       </div>
     </article>
@@ -405,16 +383,13 @@ function ProductCard({
 function ProductDetailsModal({
   onCheckout,
   onClose,
-  orderAllocationMode,
   product,
 }: {
   onCheckout: (product: Product) => void;
   onClose: () => void;
-  orderAllocationMode: OrderAllocationMode;
   product: Product;
 }) {
-  const canPreorder = orderAllocationMode === 'allocate_on_pay' && product.stock <= 0;
-  const soldOut = product.stock <= 0 && !canPreorder;
+  const soldOut = product.stock <= 0;
   const imageSrc = imageBase64Src(product.image_base64);
 
   return (
@@ -461,7 +436,7 @@ function ProductDetailsModal({
             type="button"
           >
             <CreditCard size={18} />
-            {soldOut ? '暂时无货' : canPreorder ? '预购' : '购买'}
+            {soldOut ? '暂时无货' : '购买'}
           </button>
         </div>
       </section>
@@ -546,7 +521,7 @@ function CheckoutPage({
     const poll = window.setInterval(async () => {
       try {
         const detail = await queryOrder({ id: qrOrder.id, order_password: orderPassword });
-        if (!stopped && (detail.status === 'paid' || detail.status === 'preorder')) {
+        if (!stopped && detail.status === 'paid') {
           stopped = true;
           showToast({ message: '微信支付已确认，正在进入订单详情', type: 'success' });
           onCreated(qrOrder);
@@ -612,7 +587,7 @@ function CheckoutPage({
     setReconciling(true);
     try {
       const result = await reconcileWechatPayOrder(qrOrder.id, orderPassword);
-      if (result.status === 'paid' || result.status === 'preorder') {
+      if (result.status === 'paid') {
         showToast({ message: '微信支付已确认', type: 'success' });
         onCreated(qrOrder);
       } else {
@@ -774,11 +749,11 @@ function DeliveryPage() {
   const [loadingDetail, setLoadingDetail] = useState(false);
   const selectedOrder = orders.find((item) => item.id === selectedOrderId) ?? null;
   const canQuerySelectedOrder = selectedOrder
-    ? selectedOrder.status === 'paid' || selectedOrder.status === 'preorder'
+    ? selectedOrder.status === 'paid' || isPaidAfterExpiry(selectedOrder.status, selectedOrder.paid_at)
     : paymentReturn.kind === 'success' && Boolean(selectedOrderId);
   const selectedOrderTitle = selectedOrder?.product_name ?? '支付成功';
   const selectedOrderMeta = selectedOrder
-    ? `订单状态：${statusText(selectedOrder.status)}`
+    ? `订单状态：${statusText(selectedOrder.status, selectedOrder.paid_at)}`
     : '订单状态：支付成功';
   const ordersTotalPages = Math.max(1, Math.ceil(ordersTotal / CONTACT_ORDER_PAGE_SIZE));
 
@@ -961,7 +936,7 @@ function DeliveryPage() {
                     <p className="mt-1 text-sm text-slate-500">{formatPrice(item.price_cents)}</p>
                   </div>
                   <div className="flex shrink-0 flex-col items-start gap-2 sm:items-end">
-                    <OrderStatusBadge status={item.status} />
+                    <OrderStatusBadge paidAt={item.paid_at} status={item.status} />
                     <span className="text-xs text-slate-500">{formatDate(item.created_at)}</span>
                   </div>
                 </div>
@@ -1063,9 +1038,24 @@ function PaymentReturnNotice({ message, type }: { message: string; type: 'succes
 }
 
 function OrderResult({ order }: { order: OrderDetail }) {
-  const preorder = order.status === 'preorder';
-  const paid = order.status === 'paid' && order.content;
-  const contentText = preorder ? '请联系管理员补货' : order.content ?? '支付确认后显示';
+  const paidAfterExpiry = isPaidAfterExpiry(order.status, order.paid_at);
+  if (paidAfterExpiry) {
+    return (
+      <section className="rounded-md border border-red-200 bg-red-50 p-6 shadow-panel">
+        <div className="flex items-start gap-3 text-red-800">
+          <TriangleAlert className="shrink-0" size={22} />
+          <div>
+            <h3 className="text-base font-semibold">{order.product_name}</h3>
+            <p className="mt-2 text-sm font-medium">异常订单，联系管理员处理</p>
+            <p className="mt-2 text-xs text-red-700">订单超时释放库存后才收到支付通知，系统不会自动分配库存或发货。</p>
+          </div>
+        </div>
+      </section>
+    );
+  }
+
+  const paid = order.status === 'paid' && Boolean(order.content);
+  const contentText = order.content ?? '支付确认后显示';
 
   return (
     <section className="rounded-md border border-slate-200 bg-white p-6 shadow-panel">
@@ -1073,30 +1063,30 @@ function OrderResult({ order }: { order: OrderDetail }) {
         <CheckCircle2 className={paid ? 'text-emerald-600' : 'text-amber-600'} size={22} />
         <div>
           <h3 className="text-base font-semibold">{order.product_name}</h3>
-          <p className="mt-1 text-sm text-slate-500">订单状态：{statusText(order.status)}</p>
+          <p className="mt-1 text-sm text-slate-500">订单状态：{statusText(order.status, order.paid_at)}</p>
         </div>
       </div>
       <div className="mt-5 rounded-md border border-slate-200 bg-slate-50 p-4">
-        <p className="text-sm font-medium text-slate-700">{preorder ? '预购提示' : '发货内容'}</p>
+        <p className="text-sm font-medium text-slate-700">发货内容</p>
         <pre className="mt-2 whitespace-pre-wrap break-words text-sm text-slate-700">{contentText}</pre>
       </div>
     </section>
   );
 }
 
-function OrderStatusBadge({ status }: { status: string }) {
+function OrderStatusBadge({ paidAt, status }: { paidAt: string | null; status: string }) {
   const paid = status === 'paid';
   const pending = status === 'pending';
-  const preorder = status === 'preorder';
+  const paidAfterExpiry = isPaidAfterExpiry(status, paidAt);
   const className = paid
     ? 'bg-emerald-50 text-emerald-700'
     : pending
       ? 'bg-amber-50 text-amber-700'
-      : preorder
-        ? 'bg-sky-50 text-sky-700'
+      : paidAfterExpiry
+        ? 'bg-red-50 text-red-700'
         : 'bg-slate-100 text-slate-600';
 
-  return <span className={`inline-flex rounded-md px-2 py-1 text-xs font-medium ${className}`}>{statusText(status)}</span>;
+  return <span className={`inline-flex rounded-md px-2 py-1 text-xs font-medium ${className}`}>{statusText(status, paidAt)}</span>;
 }
 
 function formatDate(value: string) {
@@ -1136,11 +1126,17 @@ function StatusPanel({ products, selectedProduct }: { products: Product[]; selec
   );
 }
 
-function statusText(status: string) {
+function isPaidAfterExpiry(status: string, paidAt: string | null) {
+  return status === 'expired' && paidAt !== null;
+}
+
+function statusText(status: string, paidAt: string | null = null) {
+  if (isPaidAfterExpiry(status, paidAt)) {
+    return '异常订单';
+  }
   const texts: Record<string, string> = {
     pending: '待支付',
     paid: '已支付',
-    preorder: '预购',
     expired: '已过期',
     cancelled: '已取消',
   };

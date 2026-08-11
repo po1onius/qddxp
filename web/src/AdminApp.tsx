@@ -24,13 +24,11 @@ import { useToast } from './Toast';
 import {
   createAdminProduct,
   createProductInfo,
-  getAdminOrderAllocationMode,
   listAdminApiCallLogs,
   listAdminOrders,
   listAdminProductInfo,
   listAdminProducts,
   listProducts,
-  updateAdminOrderAllocationMode,
   updateAdminProductStatuses,
   updateProductInfoActive,
 } from './api/client';
@@ -42,7 +40,6 @@ import type {
   AdminProductStatus,
   CreateProductInfoInput,
   CreateAdminProductResult,
-  OrderAllocationMode,
   Product,
   ProductInventoryStatus,
 } from './types';
@@ -118,7 +115,6 @@ export function AdminApp() {
   const [inventoryFilters, setInventoryFilters] = useState<InventoryFilters>(emptyInventoryFilters);
   const [orders, setOrders] = useState<AdminOrder[]>([]);
   const [logs, setLogs] = useState<AdminApiCallLog[]>([]);
-  const [orderAllocationMode, setOrderAllocationMode] = useState<OrderAllocationMode>('reserve_on_create');
   const [inventoryPage, setInventoryPage] = useState(1);
   const [inventoryTotal, setInventoryTotal] = useState(0);
   const [ordersPage, setOrdersPage] = useState(1);
@@ -131,8 +127,6 @@ export function AdminApp() {
   const [loadingInventory, setLoadingInventory] = useState(false);
   const [loadingOrders, setLoadingOrders] = useState(false);
   const [loadingLogs, setLoadingLogs] = useState(false);
-  const [loadingOrderAllocationMode, setLoadingOrderAllocationMode] = useState(false);
-  const [updatingOrderAllocationMode, setUpdatingOrderAllocationMode] = useState(false);
 
   const productOptions = useMemo(() => mergeProductOptions(products, adminProductInfos), [products, adminProductInfos]);
   const inventoryProductOptions = useMemo(
@@ -141,13 +135,12 @@ export function AdminApp() {
   );
   const totalStock = useMemo(() => products.reduce((sum, product) => sum + product.stock, 0), [products]);
   const totalSold = useMemo(() => products.reduce((sum, product) => sum + product.sold_count, 0), [products]);
-  const paidOrders = useMemo(() => orders.filter((order) => order.status === 'paid' || order.status === 'preorder').length, [orders]);
+  const paidOrders = useMemo(() => orders.filter((order) => order.status === 'paid').length, [orders]);
   const successfulLogs = useMemo(() => logs.filter((log) => log.success).length, [logs]);
 
   useEffect(() => {
     void refreshProducts();
     if (adminKey.trim()) {
-      void refreshOrderAllocationMode(adminKey);
       void refreshProductInfo(adminKey);
       void refreshOrders(adminKey);
     }
@@ -185,55 +178,6 @@ export function AdminApp() {
       });
     } finally {
       setLoadingProductInfos(false);
-    }
-  }
-
-  async function refreshOrderAllocationMode(key = adminKey) {
-    const trimmedKey = key.trim();
-    if (!trimmedKey) {
-      return;
-    }
-
-    setLoadingOrderAllocationMode(true);
-
-    try {
-      const response = await getAdminOrderAllocationMode(trimmedKey);
-      setOrderAllocationMode(response.order_allocation_mode);
-    } catch (err) {
-      showToast({
-        message: err instanceof Error ? err.message : '下单方式加载失败',
-        type: 'error',
-      });
-    } finally {
-      setLoadingOrderAllocationMode(false);
-    }
-  }
-
-  async function changeOrderAllocationMode(mode: OrderAllocationMode) {
-    const trimmedKey = adminKey.trim();
-    if (!trimmedKey) {
-      showError('请先保存管理员密钥');
-      return;
-    }
-    if (mode === orderAllocationMode) {
-      return;
-    }
-
-    setUpdatingOrderAllocationMode(true);
-
-    try {
-      const response = await updateAdminOrderAllocationMode(trimmedKey, {
-        order_allocation_mode: mode,
-      });
-      setOrderAllocationMode(response.order_allocation_mode);
-      showToast({ message: '下单方式已更新', type: 'success' });
-    } catch (err) {
-      showToast({
-        message: err instanceof Error ? err.message : '下单方式更新失败',
-        type: 'error',
-      });
-    } finally {
-      setUpdatingOrderAllocationMode(false);
     }
   }
 
@@ -368,7 +312,6 @@ export function AdminApp() {
     localStorage.setItem(ADMIN_KEY_STORAGE, trimmedKey);
     setAdminKey(trimmedKey);
     showToast({ message: '管理员密钥已保存', type: 'success' });
-    void refreshOrderAllocationMode(trimmedKey);
     void refreshProductInfo(trimmedKey);
     void refreshOrders(trimmedKey, 1);
     if (activeTab === 'inventory') {
@@ -386,7 +329,6 @@ export function AdminApp() {
     setInventoryProducts([]);
     setOrders([]);
     setLogs([]);
-    setOrderAllocationMode('reserve_on_create');
     setInventoryPage(1);
     setInventoryTotal(0);
     setOrdersPage(1);
@@ -499,12 +441,6 @@ export function AdminApp() {
           </div>
           <div className="flex flex-col gap-3 sm:flex-row sm:items-end lg:justify-end">
             <AdminKeyPanel adminKey={adminKey} onClear={clearAdminKey} onSave={saveAdminKey} />
-            <OrderAllocationModePanel
-              disabled={!adminKey.trim() || loadingOrderAllocationMode || updatingOrderAllocationMode}
-              loading={loadingOrderAllocationMode || updatingOrderAllocationMode}
-              mode={orderAllocationMode}
-              onChange={(mode) => void changeOrderAllocationMode(mode)}
-            />
             <button
               className="inline-flex h-10 items-center justify-center gap-2 rounded-md border border-slate-300 bg-white px-3 text-sm font-medium text-slate-700 hover:border-slate-500"
               onClick={() => (window.location.href = '/')}
@@ -558,15 +494,13 @@ export function AdminApp() {
               loading={loadingInventory}
               onFiltersChange={changeInventoryFilters}
               onInventoryCreated={(result) => {
-                const assignedText = result.assigned_preorders > 0 ? `已履约 ${result.assigned_preorders} 个预购订单` : '';
                 const stockedText = result.stocked > 0 ? `新增 ${result.stocked} 条可售库存` : '';
                 showToast({
-                  message: [assignedText, stockedText].filter(Boolean).join('，') || '没有新增库存',
+                  message: stockedText || '没有新增库存',
                   type: 'success',
                 });
                 void refreshProducts();
                 void refreshInventory(adminKey, inventoryFilters, 1);
-                void refreshOrders(adminKey, ordersPage);
               }}
               onInventoryStatusChanged={(updated, ignored, status) => {
                 const action = status === 'available' ? '上架' : '下架';
@@ -712,48 +646,6 @@ function AdminKeyPanel({
         </div>
       </label>
     </form>
-  );
-}
-
-function OrderAllocationModePanel({
-  disabled,
-  loading,
-  mode,
-  onChange,
-}: {
-  disabled: boolean;
-  loading: boolean;
-  mode: OrderAllocationMode;
-  onChange: (mode: OrderAllocationMode) => void;
-}) {
-  const options: Array<{ label: string; mode: OrderAllocationMode }> = [
-    { label: '创建锁定', mode: 'reserve_on_create' },
-    { label: '支付分配', mode: 'allocate_on_pay' },
-  ];
-
-  return (
-    <div className="w-full sm:w-auto">
-      <div className="mb-1 flex items-center gap-2 text-xs font-medium text-slate-500">
-        <span>下单方式</span>
-        {loading && <Loader2 className="animate-spin" size={14} />}
-      </div>
-      <div className="inline-flex h-10 w-full overflow-hidden rounded-md border border-slate-300 bg-white sm:w-auto">
-        {options.map((option) => (
-          <button
-            aria-pressed={mode === option.mode}
-            className={`min-w-0 flex-1 px-3 text-sm font-medium sm:flex-none ${
-              mode === option.mode ? 'bg-slate-950 text-white' : 'text-slate-700 hover:bg-slate-50'
-            } disabled:cursor-not-allowed disabled:opacity-60`}
-            disabled={disabled}
-            key={option.mode}
-            onClick={() => onChange(option.mode)}
-            type="button"
-          >
-            {option.label}
-          </button>
-        ))}
-      </div>
-    </div>
   );
 }
 
@@ -1519,7 +1411,6 @@ function StockCreateModal({
       console.info('[库存补货] 批量库存提交成功', {
         productInfoId,
         createdCount: createdProducts.items.length,
-        assignedPreorders: createdProducts.assigned_preorders,
         stocked: createdProducts.stocked,
       });
       onCreated(createdProducts);
@@ -1668,7 +1559,7 @@ function OrdersPanel({
                 </td>
                 <td className="max-w-[180px] px-3 py-2 text-slate-600">{order.contact}</td>
                 <td className="px-3 py-2">
-                  <OrderStatusBadge status={order.status} />
+                  <OrderStatusBadge paidAt={order.paid_at} status={order.status} />
                 </td>
                 <td className="max-w-[220px] px-3 py-2 text-xs text-slate-600">
                   <p className="font-medium text-slate-800">{paymentMethodText(order.payment_provider, order.payment_channel)}</p>
@@ -1678,7 +1569,9 @@ function OrdersPanel({
                 <td className="px-3 py-2 text-slate-600">{formatDate(order.created_at)}</td>
                 <td className="max-w-[260px] px-3 py-2">
                   <pre className="max-h-20 overflow-auto whitespace-pre-wrap break-words rounded-md bg-slate-50 p-2 text-xs text-slate-700">
-                    {order.product_content ?? '待补货'}
+                    {isPaidAfterExpiry(order.status, order.paid_at)
+                      ? '异常订单，联系管理员处理'
+                      : order.product_content ?? '未发货'}
                   </pre>
                 </td>
               </tr>
@@ -1854,19 +1747,19 @@ function ProductStatusBadge({ status }: { status: string }) {
   return <span className={`inline-flex rounded-md px-2 py-1 text-xs font-medium ${className}`}>{productStatusText(status)}</span>;
 }
 
-function OrderStatusBadge({ status }: { status: string }) {
+function OrderStatusBadge({ paidAt, status }: { paidAt: string | null; status: string }) {
   const paid = status === 'paid';
   const pending = status === 'pending';
-  const preorder = status === 'preorder';
+  const paidAfterExpiry = isPaidAfterExpiry(status, paidAt);
   const className = paid
     ? 'bg-emerald-50 text-emerald-700'
     : pending
       ? 'bg-amber-50 text-amber-700'
-      : preorder
-        ? 'bg-sky-50 text-sky-700'
+      : paidAfterExpiry
+        ? 'bg-red-50 text-red-700'
         : 'bg-slate-100 text-slate-600';
 
-  return <span className={`inline-flex rounded-md px-2 py-1 text-xs font-medium ${className}`}>{statusText(status)}</span>;
+  return <span className={`inline-flex rounded-md px-2 py-1 text-xs font-medium ${className}`}>{statusText(status, paidAt)}</span>;
 }
 
 function LogStatusBadge({ success }: { success: boolean }) {
@@ -2056,11 +1949,17 @@ function imageBase64Src(imageBase64: string) {
   return imageBase64.startsWith('data:') ? imageBase64 : `data:image/png;base64,${imageBase64}`;
 }
 
-function statusText(status: string) {
+function isPaidAfterExpiry(status: string, paidAt: string | null) {
+  return status === 'expired' && paidAt !== null;
+}
+
+function statusText(status: string, paidAt: string | null = null) {
+  if (isPaidAfterExpiry(status, paidAt)) {
+    return '异常订单';
+  }
   const texts: Record<string, string> = {
     pending: '待支付',
     paid: '已支付',
-    preorder: '预购',
     expired: '已过期',
     cancelled: '已取消',
   };
@@ -2071,7 +1970,6 @@ function paymentMethodText(provider: string, channel: string) {
   const methods: Record<string, string> = {
     'epay/alipay': '支付宝（易支付）',
     'epay/wxpay': '微信（易支付）',
-    'epay/legacy': '易支付（历史）',
     'wechatpay/native': '微信支付官方 Native',
   };
   return methods[`${provider}/${channel}`] ?? `${provider}/${channel}`;

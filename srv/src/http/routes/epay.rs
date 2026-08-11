@@ -452,7 +452,7 @@ mod tests {
             web_dist_dir: PathBuf::from("web/dist"),
             admin_key: "test-admin-key".to_string(),
             order_password_pepper: "test-password-pepper".to_string(),
-            payment_expire_minutes: 15,
+            wechatpay_expire_minutes: 15,
             epay: Some(EpayConfig {
                 gateway: "https://pay.example.com/".to_string(),
                 pid: "merchant-id".to_string(),

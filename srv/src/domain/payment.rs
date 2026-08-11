@@ -16,15 +16,14 @@ pub enum PaymentChannel {
     Alipay,
     Wxpay,
     Native,
-    /// 迁移旧版 ePay 订单时使用；不允许客户端选择。
-    Legacy,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, AsRefStr, EnumString)]
 #[strum(serialize_all = "snake_case")]
 pub enum PaymentAttemptState {
     Created,
-    PrepayCreated,
+    /// 已完成当前支付方要求的准备步骤，可以向用户展示跳转地址或付款二维码。
+    Ready,
     Succeeded,
     Failed,
     Closed,
