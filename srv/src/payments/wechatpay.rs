@@ -178,8 +178,8 @@ struct WechatPayApiErrorBody {
 
 impl WechatPayClient {
     pub fn from_config(config: &WechatPayConfig) -> Result<Self, WechatPayError> {
-        let private_key_pem = fs::read_to_string(&config.merchant_private_key_path)?;
-        let public_key_pem = fs::read_to_string(&config.public_key_path)?;
+        let private_key_pem = fs::read_to_string(&config.merchant_private_key_file)?;
+        let public_key_pem = fs::read_to_string(&config.public_key_file)?;
         let private_key = RsaPrivateKey::from_pkcs8_pem(&private_key_pem)
             .or_else(|_| RsaPrivateKey::from_pkcs1_pem(&private_key_pem))
             .map_err(|error| WechatPayError::InvalidKey(error.to_string()))?;

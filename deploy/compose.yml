@@ -25,7 +25,8 @@ services:
     environment:
       DATABASE_URL: postgres://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:-postgres}@db:5432/${POSTGRES_DB:-qddxp}
       PUBLIC_BASE_URL: ${PUBLIC_BASE_URL:-http://localhost:8080}
-      WEB_RETURN_URL: ${WEB_RETURN_URL:-http://localhost:8080/delivery}
+      WEB_RETURN_URL: ${WEB_RETURN_URL:-http://localhost:8080/orders}
+      SHOP_NAME: ${SHOP_NAME:?SHOP_NAME must be set}
       ADMIN_KEY: ${ADMIN_KEY:-change-me}
       ORDER_PASSWORD_PEPPER: ${ORDER_PASSWORD_PEPPER:-change-this-in-production}
       WXPAY_EXPIRE_MINUTES: ${WXPAY_EXPIRE_MINUTES:-15}
@@ -36,17 +37,34 @@ services:
       WXPAY_APP_ID: ${WXPAY_APP_ID:-}
       WXPAY_MCH_ID: ${WXPAY_MCH_ID:-}
       WXPAY_MERCHANT_SERIAL_NO: ${WXPAY_MERCHANT_SERIAL_NO:-}
-      WXPAY_MERCHANT_PRIVATE_KEY_PATH: ${WXPAY_MERCHANT_PRIVATE_KEY_PATH:-}
       WXPAY_API_V3_KEY: ${WXPAY_API_V3_KEY:-}
       WXPAY_PUBLIC_KEY_ID: ${WXPAY_PUBLIC_KEY_ID:-}
-      WXPAY_PUBLIC_KEY_PATH: ${WXPAY_PUBLIC_KEY_PATH:-}
     depends_on:
       db:
         condition: service_healthy
     ports:
       - "${BIND_HOST:-127.0.0.1}:${BIND_PORT:-8080}:3000"
     volumes:
-      - ./secrets:/run/secrets/qddxp:ro
+      # 三个部署参数都是宿主机上的具体文件。容器目标路径由 Dockerfile 固定，
+      # create_host_path=false 可避免路径拼错时被静默创建成目录。
+      - type: bind
+        source: ${SHOP_LOGO_FILE:?SHOP_LOGO_FILE must be set}
+        target: /run/assets/qddxp/shop-logo.svg
+        read_only: true
+        bind:
+          create_host_path: false
+      - type: bind
+        source: ${WXPAY_MERCHANT_PRIVATE_KEY_FILE:?WXPAY_MERCHANT_PRIVATE_KEY_FILE must be set}
+        target: /run/secrets/qddxp/wechatpay_merchant_private_key.pem
+        read_only: true
+        bind:
+          create_host_path: false
+      - type: bind
+        source: ${WXPAY_PUBLIC_KEY_FILE:?WXPAY_PUBLIC_KEY_FILE must be set}
+        target: /run/secrets/qddxp/wechatpay_public_key.pem
+        read_only: true
+        bind:
+          create_host_path: false
 
 volumes:
   qddxp_db_data:

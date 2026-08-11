@@ -1,20 +1,23 @@
-import { useEffect, useMemo, useState } from 'react';
-import type { FormEvent, ReactNode } from 'react';
+import { useCallback, useEffect, useMemo, useState } from 'react';
+import type { FormEvent } from 'react';
 import { CheckCircle2, ChevronLeft, ChevronRight, ClipboardCheck, CreditCard, RefreshCcw, Search, TriangleAlert, X } from 'lucide-react';
 import QRCode from 'qrcode';
+import { Link, Route, Routes, useNavigate, useParams } from 'react-router-dom';
 import { AdminApp } from './AdminApp';
+import { StoreBrand } from './StoreBrand';
 import { useToast } from './Toast';
 import {
   createOrder,
+  getProduct,
+  getStorefrontConfig,
   listOrdersByContact,
   listPaymentMethods,
   listProductPage,
   queryOrder,
   reconcileWechatPayOrder,
 } from './api/client';
-import type { CreateOrderResult, OrderDetail, OrderSummary, PaymentMethod, Product } from './types';
+import type { CreateOrderResult, OrderDetail, OrderSummary, PaymentMethod, Product, StorefrontConfig } from './types';
 
-type View = 'catalog' | 'checkout' | 'delivery';
 type PaymentReturnState =
   | { kind: 'none' }
   | { kind: 'success'; orderId: string }
@@ -25,6 +28,8 @@ const LAST_CONTACT_STORAGE = 'qddxp_last_contact';
 const PRODUCT_PAGE_SIZE = 20;
 const CONTACT_ORDER_PAGE_SIZE = 20;
 const ADMIN_PAGE_PATH = '/a-dmin';
+const ORDER_QUERY_PAGE_PATH = '/orders';
+const ORDER_CREATE_PAGE_PATH = '/orders/new';
 
 const currencyFormatter = new Intl.NumberFormat('zh-CN', {
   style: 'currency',
@@ -79,41 +84,64 @@ function getInitialSelectedOrderId(paymentReturn: PaymentReturnState) {
   return '';
 }
 
-function getInitialShopView(): View {
-  const params = new URLSearchParams(window.location.search);
-  if (
-    window.location.pathname.startsWith('/delivery') ||
-    params.has('param') ||
-    params.has('trade_status') ||
-    params.has('out_trade_no')
-  ) {
-    return 'delivery';
-  }
-
-  return 'catalog';
-}
-
 export function App() {
-  if (isAdminPagePath(window.location.pathname)) {
-    return <AdminApp />;
+  const [storefront, setStorefront] = useState<StorefrontConfig | null>(null);
+  const [storefrontError, setStorefrontError] = useState('');
+
+  useEffect(() => {
+    let cancelled = false;
+    void getStorefrontConfig()
+      .then((config) => {
+        if (cancelled) {
+          return;
+        }
+        setStorefront(config);
+        document.title = config.shop_name;
+      })
+      .catch((error) => {
+        if (cancelled) {
+          return;
+        }
+        console.error('加载店铺展示配置失败', error);
+        setStorefrontError(error instanceof Error ? error.message : '店铺展示配置加载失败');
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  if (storefrontError) {
+    return (
+      <main className="flex min-h-screen items-center justify-center bg-slate-50 px-4 text-slate-950">
+        <section className="w-full max-w-md rounded-md border border-red-200 bg-red-50 p-6 text-red-800">
+          <h1 className="text-lg font-semibold">店铺配置加载失败</h1>
+          <p className="mt-2 break-words text-sm">{storefrontError}</p>
+        </section>
+      </main>
+    );
+  }
+  if (!storefront) {
+    return <main className="min-h-screen animate-pulse bg-slate-50" aria-label="正在加载店铺配置" />;
   }
 
-  return <ShopApp />;
+  return (
+    <Routes>
+      <Route element={<ShopApp storefront={storefront} />} path="/" />
+      <Route element={<OrdersApp storefront={storefront} />} path={ORDER_QUERY_PAGE_PATH} />
+      <Route element={<CreateOrderApp storefront={storefront} />} path={`${ORDER_CREATE_PAGE_PATH}/:productId`} />
+      <Route element={<AdminApp storefront={storefront} />} path={`${ADMIN_PAGE_PATH}/*`} />
+      <Route element={<NotFoundPage storefront={storefront} />} path="*" />
+    </Routes>
+  );
 }
 
-function isAdminPagePath(pathname: string) {
-  return pathname === ADMIN_PAGE_PATH || pathname.startsWith(`${ADMIN_PAGE_PATH}/`);
-}
-
-function ShopApp() {
+function ShopApp({ storefront }: { storefront: StorefrontConfig }) {
   const { showToast } = useToast();
-  const [view, setView] = useState<View>(() => getInitialShopView());
+  const navigate = useNavigate();
   const [products, setProducts] = useState<Product[]>([]);
   const [productPage, setProductPage] = useState(1);
   const [productTotal, setProductTotal] = useState(0);
-  const [selectedProduct, setSelectedProduct] = useState<Product | null>(null);
   const [detailsProduct, setDetailsProduct] = useState<Product | null>(null);
-  const [paymentMethods, setPaymentMethods] = useState<PaymentMethod[]>([]);
   const [loadingProducts, setLoadingProducts] = useState(true);
 
   useEffect(() => {
@@ -121,19 +149,7 @@ function ShopApp() {
   }, []);
 
   async function refreshProducts() {
-    await Promise.all([refreshPaymentMethods(), loadProductPage(productPage)]);
-  }
-
-  async function refreshPaymentMethods() {
-    try {
-      setPaymentMethods(await listPaymentMethods());
-    } catch (error) {
-      setPaymentMethods([]);
-      showToast({
-        message: error instanceof Error ? error.message : '支付方式加载失败',
-        type: 'error',
-      });
-    }
+    await loadProductPage(productPage);
   }
 
   async function loadProductPage(page: number) {
@@ -158,8 +174,7 @@ function ShopApp() {
 
   function openCheckout(product: Product) {
     setDetailsProduct(null);
-    setSelectedProduct(product);
-    setView('checkout');
+    navigate(`${ORDER_CREATE_PAGE_PATH}/${encodeURIComponent(product.id)}`);
   }
 
   return (
@@ -167,91 +182,214 @@ function ShopApp() {
       <header className="border-b border-slate-200 bg-white">
         <div className="mx-auto flex max-w-7xl flex-col gap-4 px-4 py-4 sm:flex-row sm:items-center sm:justify-between lg:px-8">
           <div>
-            <p className="text-sm font-medium text-slate-500">小白羊AI小铺</p>
+            <StoreBrand storefront={storefront} />
           </div>
           <nav className="flex flex-wrap gap-2" aria-label="主导航">
-            <NavButton active={view === 'delivery'} icon={<ClipboardCheck size={18} />} onClick={() => setView('delivery')}>
+            <Link
+              className="inline-flex h-10 items-center gap-2 rounded-md border border-slate-300 bg-white px-3 text-sm font-medium text-slate-700 transition hover:border-slate-500"
+              to={ORDER_QUERY_PAGE_PATH}
+            >
+              <ClipboardCheck size={18} />
               订单查询
-            </NavButton>
+            </Link>
           </nav>
         </div>
       </header>
 
       <main className="mx-auto grid max-w-7xl gap-8 px-4 py-8 lg:grid-cols-[1fr_340px] lg:px-8">
         <section>
-          {view === 'catalog' && (
-            <CatalogPage
-              loading={loadingProducts}
-              onCheckout={openCheckout}
-              onOpenDetails={setDetailsProduct}
-              onPageChange={(page) => void loadProductPage(page)}
-              onRefresh={refreshProducts}
-              page={productPage}
-              pageSize={PRODUCT_PAGE_SIZE}
-              products={products}
-              total={productTotal}
-            />
-          )}
-          {view === 'checkout' && (
-            <CheckoutPage
-              paymentMethods={paymentMethods}
-              product={selectedProduct}
-              onBack={() => setView('catalog')}
-              onCreated={(order) => {
-                sessionStorage.setItem(LAST_ORDER_ID_STORAGE, order.id);
-                if (order.payment_action?.type === 'redirect') {
-                  window.location.href = order.payment_action.url;
-                  return;
-                }
-                setView('delivery');
-              }}
-            />
-          )}
-          {view === 'delivery' && <DeliveryPage />}
+          <CatalogPage
+            loading={loadingProducts}
+            onCheckout={openCheckout}
+            onOpenDetails={setDetailsProduct}
+            onPageChange={(page) => void loadProductPage(page)}
+            onRefresh={refreshProducts}
+            page={productPage}
+            pageSize={PRODUCT_PAGE_SIZE}
+            products={products}
+            total={productTotal}
+          />
         </section>
 
         <aside className="space-y-4">
-          <StatusPanel products={products} selectedProduct={selectedProduct} />
+          <StatusPanel products={products} />
         </aside>
       </main>
       {detailsProduct && (
-          <ProductDetailsModal
-            onCheckout={openCheckout}
-            onClose={() => setDetailsProduct(null)}
-            product={detailsProduct}
-          />
+        <ProductDetailsModal
+          onCheckout={openCheckout}
+          onClose={() => setDetailsProduct(null)}
+          product={detailsProduct}
+        />
       )}
     </div>
   );
 }
 
-function NavButton({
-  active,
-  children,
-  disabled,
-  icon,
-  onClick,
-}: {
-  active: boolean;
-  children: string;
-  disabled?: boolean;
-  icon: ReactNode;
-  onClick: () => void;
-}) {
+// 创建订单页面根据路由中的商品 ID 重新读取公开商品快照，支持刷新和直接访问。
+function CreateOrderApp({ storefront }: { storefront: StorefrontConfig }) {
+  const { productId } = useParams<{ productId: string }>();
+  const navigate = useNavigate();
+  const { showToast } = useToast();
+  const [product, setProduct] = useState<Product | null>(null);
+  const [paymentMethods, setPaymentMethods] = useState<PaymentMethod[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [loadError, setLoadError] = useState('');
+
+  useEffect(() => {
+    let cancelled = false;
+
+    async function loadOrderCreationContext() {
+      if (!productId) {
+        setLoadError('下单地址缺少商品 ID');
+        setLoading(false);
+        return;
+      }
+
+      setLoading(true);
+      setLoadError('');
+      const [productResult, paymentMethodsResult] = await Promise.allSettled([
+        getProduct(productId),
+        listPaymentMethods(),
+      ]);
+      if (cancelled) {
+        return;
+      }
+
+      if (productResult.status === 'fulfilled') {
+        setProduct(productResult.value);
+      } else {
+        console.error('加载下单商品失败', { productId, error: productResult.reason });
+        setProduct(null);
+        setLoadError(productResult.reason instanceof Error ? productResult.reason.message : '商品加载失败');
+      }
+
+      if (paymentMethodsResult.status === 'fulfilled') {
+        setPaymentMethods(paymentMethodsResult.value);
+      } else {
+        console.error('加载支付方式失败', { productId, error: paymentMethodsResult.reason });
+        setPaymentMethods([]);
+        showToast({
+          message: paymentMethodsResult.reason instanceof Error ? paymentMethodsResult.reason.message : '支付方式加载失败',
+          type: 'error',
+        });
+      }
+      setLoading(false);
+    }
+
+    void loadOrderCreationContext();
+    return () => {
+      cancelled = true;
+    };
+  }, [productId, showToast]);
+
+  // 保持回调引用稳定，避免二维码轮询因为父组件重渲染而反复重启。
+  const handleCreated = useCallback(
+    (order: CreateOrderResult) => {
+      sessionStorage.setItem(LAST_ORDER_ID_STORAGE, order.id);
+      if (order.payment_action?.type === 'redirect') {
+        window.location.href = order.payment_action.url;
+        return;
+      }
+      navigate(`${ORDER_QUERY_PAGE_PATH}?order_id=${encodeURIComponent(order.id)}`);
+    },
+    [navigate],
+  );
+
   return (
-    <button
-      className={`inline-flex h-10 items-center gap-2 rounded-md border px-3 text-sm font-medium transition ${
-        active
-          ? 'border-slate-950 bg-slate-950 text-white'
-          : 'border-slate-300 bg-white text-slate-700 hover:border-slate-500'
-      } disabled:cursor-not-allowed disabled:opacity-40`}
-      disabled={disabled}
-      onClick={onClick}
-      type="button"
-    >
-      {icon}
-      {children}
-    </button>
+    <div className="min-h-screen bg-slate-50 text-slate-950">
+      <header className="border-b border-slate-200 bg-white">
+        <div className="mx-auto flex max-w-7xl flex-col gap-4 px-4 py-4 sm:flex-row sm:items-center sm:justify-between lg:px-8">
+          <div>
+            <StoreBrand storefront={storefront} />
+            <h1 className="text-xl font-semibold">创建订单</h1>
+          </div>
+          <nav aria-label="创建订单导航">
+            <Link
+              className="inline-flex h-10 items-center gap-2 rounded-md border border-slate-300 bg-white px-3 text-sm font-medium text-slate-700 transition hover:border-slate-500"
+              to="/"
+            >
+              <ChevronLeft size={18} />
+              返回商城
+            </Link>
+          </nav>
+        </div>
+      </header>
+      <main className="mx-auto max-w-7xl px-4 py-8 lg:px-8">
+        {loading && (
+          <div className="h-96 max-w-2xl animate-pulse rounded-md border border-slate-200 bg-white" aria-label="正在加载下单页面" />
+        )}
+        {!loading && loadError && (
+          <section className="max-w-2xl rounded-md border border-red-200 bg-red-50 p-6 text-red-800">
+            <h2 className="text-lg font-semibold">无法创建订单</h2>
+            <p className="mt-2 text-sm">{loadError}</p>
+            <Link className="mt-5 inline-flex h-10 items-center rounded-md bg-slate-950 px-4 text-sm font-medium text-white" to="/">
+              返回商品列表
+            </Link>
+          </section>
+        )}
+        {!loading && product && (
+          <CheckoutPage
+            onBack={() => navigate('/')}
+            onCreated={handleCreated}
+            paymentMethods={paymentMethods}
+            product={product}
+          />
+        )}
+      </main>
+    </div>
+  );
+}
+
+// 订单查询使用独立页面组件，进入该路由时不会加载商品目录和支付方式。
+function OrdersApp({ storefront }: { storefront: StorefrontConfig }) {
+  return (
+    <div className="min-h-screen bg-slate-50 text-slate-950">
+      <header className="border-b border-slate-200 bg-white">
+        <div className="mx-auto flex max-w-7xl flex-col gap-4 px-4 py-4 sm:flex-row sm:items-center sm:justify-between lg:px-8">
+          <div>
+            <StoreBrand storefront={storefront} />
+            <h1 className="text-xl font-semibold">订单查询</h1>
+          </div>
+          <nav aria-label="订单查询导航">
+            <Link
+              className="inline-flex h-10 items-center gap-2 rounded-md border border-slate-300 bg-white px-3 text-sm font-medium text-slate-700 transition hover:border-slate-500"
+              to="/"
+            >
+              <ChevronLeft size={18} />
+              返回商城
+            </Link>
+          </nav>
+        </div>
+      </header>
+      <main className="mx-auto max-w-7xl px-4 py-8 lg:px-8">
+        <OrderQueryPage />
+      </main>
+    </div>
+  );
+}
+
+function NotFoundPage({ storefront }: { storefront: StorefrontConfig }) {
+  return (
+    <div className="min-h-screen bg-slate-50 text-slate-950">
+      <header className="border-b border-slate-200 bg-white">
+        <div className="mx-auto max-w-7xl px-4 py-4 lg:px-8">
+          <StoreBrand storefront={storefront} />
+        </div>
+      </header>
+      <main className="flex items-center justify-center px-4 py-16">
+        <section className="w-full max-w-md rounded-md border border-slate-200 bg-white p-6 text-center shadow-panel">
+          <h1 className="text-xl font-semibold">页面不存在</h1>
+          <p className="mt-2 text-sm text-slate-500">请检查访问地址，或返回商城继续浏览。</p>
+          <Link
+            className="mt-5 inline-flex h-10 items-center justify-center rounded-md bg-slate-950 px-4 text-sm font-medium text-white"
+            to="/"
+          >
+            返回商城
+          </Link>
+        </section>
+      </main>
+    </div>
   );
 }
 
@@ -462,7 +600,7 @@ function CheckoutPage({
   onBack: () => void;
   onCreated: (order: CreateOrderResult) => void;
   paymentMethods: PaymentMethod[];
-  product: Product | null;
+  product: Product;
 }) {
   const { showToast } = useToast();
   const [contact, setContact] = useState('');
@@ -540,7 +678,8 @@ function CheckoutPage({
 
   async function submit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
-    if (!product) {
+    if (product.stock <= 0) {
+      showToast({ message: '商品暂时无货，请返回商品列表', type: 'error' });
       return;
     }
     if (!selectedPayment) {
@@ -601,18 +740,6 @@ function CheckoutPage({
     } finally {
       setReconciling(false);
     }
-  }
-
-  if (!product) {
-    return (
-      <div className="rounded-md border border-slate-200 bg-white p-6">
-        <h2 className="text-lg font-semibold">请选择商品</h2>
-        <p className="mt-2 text-sm text-slate-500">从商品列表选择商品后继续下单。</p>
-        <button className="mt-5 rounded-md bg-slate-950 px-4 py-2 text-sm font-medium text-white" onClick={onBack} type="button">
-          返回商品列表
-        </button>
-      </div>
-    );
   }
 
   return (
@@ -685,11 +812,11 @@ function CheckoutPage({
         </button>
         <button
           className="inline-flex h-10 items-center justify-center gap-2 rounded-md bg-slate-950 px-4 text-sm font-medium text-white disabled:cursor-wait disabled:bg-slate-400"
-          disabled={submitting || !selectedPayment}
+          disabled={submitting || !selectedPayment || product.stock <= 0}
           type="submit"
         >
           <CreditCard size={18} />
-          {submitting ? '提交中' : '提交并支付'}
+          {product.stock <= 0 ? '暂时无货' : submitting ? '提交中' : '提交并支付'}
         </button>
       </div>
       {qrOrder?.payment_action?.type === 'qr_code' && (
@@ -734,7 +861,7 @@ function CheckoutPage({
   );
 }
 
-function DeliveryPage() {
+function OrderQueryPage() {
   const { showToast } = useToast();
   const [paymentReturn] = useState(() => getPaymentReturnState());
   const [contact, setContact] = useState(() => sessionStorage.getItem(LAST_CONTACT_STORAGE) ?? '');
@@ -1097,7 +1224,7 @@ function formatDate(value: string) {
   return date.toLocaleString('zh-CN', { hour12: false });
 }
 
-function StatusPanel({ products, selectedProduct }: { products: Product[]; selectedProduct: Product | null }) {
+function StatusPanel({ products }: { products: Product[] }) {
   const totalStock = useMemo(() => products.reduce((sum, product) => sum + product.stock, 0), [products]);
   const totalSold = useMemo(() => products.reduce((sum, product) => sum + product.sold_count, 0), [products]);
 
@@ -1116,10 +1243,6 @@ function StatusPanel({ products, selectedProduct }: { products: Product[]; selec
         <div className="flex justify-between gap-3">
           <dt className="text-slate-500">已售数量</dt>
           <dd className="font-medium">{totalSold}</dd>
-        </div>
-        <div className="flex justify-between gap-3">
-          <dt className="text-slate-500">已选商品</dt>
-          <dd className="max-w-[180px] truncate font-medium">{selectedProduct?.name ?? '-'}</dd>
         </div>
       </dl>
     </div>

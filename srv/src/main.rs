@@ -38,6 +38,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         public_base_url = %config.public_base_url,
         web_return_url = %config.web_return_url,
         web_dist_dir = %config.web_dist_dir.display(),
+        shop_name = %config.shop_name,
+        shop_logo_file = %config.shop_logo_file.display(),
         epay_configured = config.epay.is_some(),
         wechatpay_configured = config.wechatpay.is_some(),
         "application config loaded"

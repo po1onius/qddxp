@@ -21,6 +21,7 @@ import {
   X,
 } from 'lucide-react';
 import { useToast } from './Toast';
+import { StoreBrand } from './StoreBrand';
 import {
   createAdminProduct,
   createProductInfo,
@@ -42,6 +43,7 @@ import type {
   CreateAdminProductResult,
   Product,
   ProductInventoryStatus,
+  StorefrontConfig,
 } from './types';
 
 const ADMIN_KEY_STORAGE = 'qddxp_admin_key';
@@ -106,7 +108,7 @@ function totalPagesFor(total: number, pageSize: number) {
   return Math.max(1, Math.ceil(total / pageSize));
 }
 
-export function AdminApp() {
+export function AdminApp({ storefront }: { storefront: StorefrontConfig }) {
   const { showToast } = useToast();
   const [adminKey, setAdminKey] = useState(() => localStorage.getItem(ADMIN_KEY_STORAGE) ?? '');
   const [products, setProducts] = useState<Product[]>([]);
@@ -436,7 +438,7 @@ export function AdminApp() {
       <header className="border-b border-slate-200 bg-white">
         <div className="mx-auto flex max-w-7xl flex-col gap-4 px-4 py-4 lg:flex-row lg:items-center lg:justify-between lg:px-8">
           <div>
-            <p className="text-sm font-medium text-slate-500">虚拟商品商城</p>
+            <StoreBrand storefront={storefront} />
             <h1 className="text-2xl font-semibold tracking-normal">管理后台</h1>
           </div>
           <div className="flex flex-col gap-3 sm:flex-row sm:items-end lg:justify-end">

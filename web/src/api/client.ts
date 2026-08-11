@@ -12,6 +12,7 @@ import type {
   OffsetPageResponse,
   PaymentMethod,
   ReconcilePaymentResult,
+  StorefrontConfig,
   OrderDetail,
   OrderSummary,
   Product,
@@ -58,6 +59,12 @@ function withQuery(path: string, params: Record<string, string | number | undefi
   return query ? `${path}?${query}` : path;
 }
 
+export async function getStorefrontConfig(): Promise<StorefrontConfig> {
+  const config = await request<StorefrontConfig>('/storefront');
+  // Logo 与配置接口来自同一 API 服务。使用统一的 API 基础地址，兼容开发代理和独立 API 域名。
+  return { ...config, logo_url: apiUrl('/storefront/logo') };
+}
+
 export type ProductPageParams = {
   page?: number;
   page_size?: number;
@@ -75,6 +82,10 @@ export function listProductPage(params: ProductPageParams = {}): Promise<OffsetP
 export async function listProducts(): Promise<Product[]> {
   const page = await listProductPage({ page_size: 100 });
   return page.items;
+}
+
+export function getProduct(productId: string): Promise<Product> {
+  return request<Product>(`/products/${encodeURIComponent(productId)}`);
 }
 
 export function listPaymentMethods(): Promise<PaymentMethod[]> {

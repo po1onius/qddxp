@@ -1,6 +1,6 @@
 # qddxp — 虚拟商品商城
 
-一个带库存管理与在线支付的虚拟商品（卡密类）售卖站点。顾客在线下单并完成支付后，系统自动从库存中分配商品卡密；支持下单时预留或支付时分配两种库存策略，库存不足时自动转为预售。
+一个带库存管理与在线支付的虚拟商品（卡密类）售卖站点。顾客下单时系统立即预留真实库存，完成支付后自动交付卡密；库存不足时拒绝创建订单。
 
 ## 功能特性
 
@@ -29,11 +29,13 @@
 | 层 | 技术 |
 | --- | --- |
 | 后端 | Rust · axum · diesel (async) · PostgreSQL 18 · tower-http · tracing |
-| 前端 | React 18 · TypeScript · Vite · Tailwind CSS |
+| 前端 | React 18 · React Router 7 · TypeScript · Vite · Tailwind CSS |
 | 支付 | 易支付 MD5 协议；微信支付官方 API v3 Native（RSA-SHA256 / AES-256-GCM） |
 | 部署 | Docker 多阶段构建 · docker compose |
 
 后端直接托管前端构建产物（`web/dist`），前后端同源部署。
+
+顾客端页面使用独立前端路由：商城 `/`、创建订单 `/orders/new/:productId`、订单查询 `/orders`；管理后台使用 `/a-dmin`。
 
 ## 目录结构
 
@@ -48,6 +50,8 @@
 │   └── src/              # 顾客端 + 管理后台
 ├── deploy/
 │   ├── compose.yml       # docker compose 部署
+│   ├── assets/           # 示例店铺 Logo
+│   ├── secrets/          # 微信支付 PEM 文件（默认被 Git 忽略）
 │   └── .env.example      # 环境变量示例
 ├── Dockerfile            # 多阶段构建（Rust + Node → 精简运行镜像）
 └── Makefile              # 本地开发命令
@@ -59,7 +63,7 @@
 
 ```bash
 # 一键启动：启动 Postgres、构建前端、运行后端
-make dev
+make dev SHOP_NAME='我的店铺' SHOP_LOGO_FILE="$PWD/deploy/assets/shop-logo.svg"
 
 # 或分开运行
 make db-up && make srv      # 后端（http://localhost:3000）
@@ -86,21 +90,28 @@ docker compose -f deploy/compose.yml up -d --build
 | `ADMIN_KEY` | 是 | 管理后台密钥（请求头 `x-admin-key`） |
 | `LISTEN_ADDR` | 否 | 监听地址，默认 `0.0.0.0:3000` |
 | `PUBLIC_BASE_URL` | 否 | 对外基础 URL，用于支付回调地址拼接 |
-| `WEB_RETURN_URL` | 否 | 支付成功后的回跳页面 |
+| `WEB_RETURN_URL` | 否 | 支付成功后的回跳页面，应指向前端订单查询路由 `/orders` |
+| `SHOP_NAME` | 是 | 店铺名称，1–100 个字符 |
+| `SHOP_LOGO_FILE` | 是 | SVG Logo 文件，启动时校验真实内容；Docker 部署时填写宿主机文件路径 |
 | `ORDER_PASSWORD_PEPPER` | 否 | 订单密码哈希 pepper，生产环境务必修改 |
 | `WXPAY_EXPIRE_MINUTES` | 否 | 微信官方 Native 支付结束分钟数，默认 15，范围 1–120；ePay 固定为 3 分钟 |
 | `EPAY_GATEWAY` / `EPAY_PID` / `EPAY_KEY` | 否 | 三者都设置才启用易支付 |
 | `WXPAY_APP_ID` / `WXPAY_MCH_ID` | 否 | 微信支付官方直连的应用 ID 与直连商户号 |
 | `WXPAY_MERCHANT_SERIAL_NO` | 否 | 商户 API 证书序列号 |
-| `WXPAY_MERCHANT_PRIVATE_KEY_PATH` | 否 | 商户 API 私钥 PEM 文件路径 |
+| `WXPAY_MERCHANT_PRIVATE_KEY_FILE` | 否 | 商户 API 私钥 PEM 文件；Docker 部署时填写宿主机文件路径 |
 | `WXPAY_API_V3_KEY` | 否 | 32 字节 APIv3 密钥，仅用于回调资源解密 |
-| `WXPAY_PUBLIC_KEY_ID` / `WXPAY_PUBLIC_KEY_PATH` | 否 | 微信支付公钥 ID 与 PEM 文件路径，用于应答和回调验签 |
+| `WXPAY_PUBLIC_KEY_ID` / `WXPAY_PUBLIC_KEY_FILE` | 否 | 微信支付公钥 ID 与 PEM 文件，用于应答和回调验签；Docker 部署时文件参数填写宿主机路径 |
 | `RUST_LOG` | 否 | 日志级别，默认 `info` |
 
-微信支付的七项 `WXPAY_*` 配置必须同时设置，否则应用会拒绝启动。生产环境的
-`PUBLIC_BASE_URL` 必须使用公网 HTTPS；回调地址固定生成为
-`/api/payments/wechatpay/notify`。Docker 部署时将两个 PEM 文件放入
-`deploy/secrets/`，该目录只读挂载且默认被 Git 忽略。
+启用微信支付时，五项业务凭据与两个 PEM 文件必须同时提供，否则应用会拒绝启动。
+生产环境的 `PUBLIC_BASE_URL` 必须使用公网 HTTPS；回调地址固定生成为
+`/api/payments/wechatpay/notify`。微信支付未启用时，两个文件参数保留示例中的占位文件即可。
+
+店铺名称与 Logo 是运行时配置，修改后重启应用即可，不需要重新构建前端。Docker
+部署只使用三个具体的宿主机文件参数：`SHOP_LOGO_FILE`、
+`WXPAY_MERCHANT_PRIVATE_KEY_FILE`、`WXPAY_PUBLIC_KEY_FILE`。Compose 分别把它们
+只读映射到 Dockerfile 预设的容器路径，不再挂载整个目录，也无需配置容器内路径。
+应用启动时会解析 Logo 内容并确认其为 SVG，而不是信任文件扩展名。
 
 ### 微信支付官方直连配置
 
@@ -109,8 +120,10 @@ docker compose -f deploy/compose.yml up -d --build
 证书对应私钥、APIv3 密钥，以及微信支付公钥 ID 和公钥文件。当前实现使用微信支付
 公钥模式验签，不接受未验签的下单应答、查单应答或支付通知。
 
-1. 将 `apiclient_key.pem` 和微信支付公钥放入 `deploy/secrets/`，文件不要提交到 Git。
-2. 在 `deploy/.env` 中完整填写七项 `WXPAY_*` 配置，并把 `PUBLIC_BASE_URL` 改为
+1. 将 `apiclient_key.pem` 和微信支付公钥放入 `deploy/secrets/`，文件不要提交到 Git；
+   并确保容器内的非 root 用户对文件具有读权限。
+2. 在 `deploy/.env` 中完整填写五项业务凭据，将两个 `WXPAY_*_FILE` 分别指向上述
+   宿主机文件，并把 `PUBLIC_BASE_URL` 改为
    可由微信服务器访问的 HTTPS 域名。
 3. 确认反向代理允许 `POST /api/payments/wechatpay/notify` 直达应用，且不会改写请求体。
 4. 重新构建并启动服务；前台支付方式列表出现“微信支付（官方）”即表示客户端初始化成功。

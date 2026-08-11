@@ -1,3 +1,8 @@
+export type StorefrontConfig = {
+  shop_name: string;
+  logo_url: string;
+};
+
 export type Product = {
   id: string;
   image_base64: string | null;

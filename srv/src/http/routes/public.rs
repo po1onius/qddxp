@@ -2,7 +2,7 @@ use std::collections::HashMap;
 
 use axum::{
     Json,
-    extract::{Query, State},
+    extract::{Path, Query, State},
 };
 use chrono::{DateTime, Duration, Utc};
 use diesel::{dsl::count_star, prelude::*};
@@ -36,6 +36,12 @@ pub struct ProductListItem {
     pub price_cents: i64,
     pub sold_count: i64,
     pub stock: i64,
+}
+
+#[derive(Debug, Serialize)]
+pub struct StorefrontResponse {
+    pub shop_name: String,
+    pub logo_url: &'static str,
 }
 
 #[derive(Debug, Deserialize)]
@@ -116,6 +122,14 @@ pub struct OrderDetailResponse {
     pub content: Option<String>,
 }
 
+pub async fn get_storefront(State(state): State<AppState>) -> Json<StorefrontResponse> {
+    tracing::debug!(shop_name = %state.config.shop_name, "getting public storefront configuration");
+    Json(StorefrontResponse {
+        shop_name: state.config.shop_name.clone(),
+        logo_url: "/api/storefront/logo",
+    })
+}
+
 pub async fn list_products(
     State(state): State<AppState>,
     Query(pagination): Query<OffsetPagination>,
@@ -170,6 +184,49 @@ pub async fn list_products(
         page_size,
         total,
     }))
+}
+
+/// 获取创建订单页面所需的单个在售商品快照。
+///
+/// 创建订单是独立前端路由，浏览器刷新后不能再依赖商品列表页保存在内存中的对象，因此
+/// 这里按商品定义 ID 重新查询名称、价格、详情以及实时库存。已下架商品对公共端表现为不存在。
+pub async fn get_product(
+    State(state): State<AppState>,
+    Path(product_id): Path<Uuid>,
+) -> Result<Json<ProductListItem>, AppError> {
+    tracing::info!(%product_id, "getting public product for order creation");
+    let mut conn = state.pool.get().await?;
+    let product = product_info::table
+        .filter(product_info::id.eq(product_id))
+        .filter(product_info::active.eq(true))
+        .first::<ProductInfo>(&mut conn)
+        .await
+        .optional()?
+        .ok_or_else(|| {
+            tracing::warn!(%product_id, "public product not found or inactive");
+            AppError::NotFound("product info not found".to_string())
+        })?;
+
+    let product_ids = [product.id];
+    let stock_counts = available_stock_counts(&mut conn, &product_ids).await?;
+    let sold_counts = paid_order_counts(&mut conn, &product_ids).await?;
+    let response = ProductListItem {
+        id: product.id,
+        image_base64: product.image_base64,
+        name: product.name,
+        details: product.details,
+        price_cents: product.price_cents,
+        sold_count: sold_counts.get(&product.id).copied().unwrap_or(0),
+        stock: stock_counts.get(&product.id).copied().unwrap_or(0),
+    };
+    tracing::info!(
+        %product_id,
+        stock = response.stock,
+        sold_count = response.sold_count,
+        "got public product for order creation"
+    );
+
+    Ok(Json(response))
 }
 
 pub async fn list_payment_methods(

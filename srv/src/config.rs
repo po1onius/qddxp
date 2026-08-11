@@ -1,4 +1,8 @@
-use std::{env, net::SocketAddr, path::PathBuf};
+use std::{
+    env,
+    net::SocketAddr,
+    path::{Path, PathBuf},
+};
 
 use thiserror::Error;
 
@@ -9,6 +13,8 @@ pub struct AppConfig {
     pub public_base_url: String,
     pub web_return_url: String,
     pub web_dist_dir: PathBuf,
+    pub shop_name: String,
+    pub shop_logo_file: PathBuf,
     pub admin_key: String,
     pub order_password_pepper: String,
     /// 微信官方 Native 支付结束时间。ePay 使用固定三分钟的本地库存预占期限，二者不能共用配置。
@@ -29,10 +35,10 @@ pub struct WechatPayConfig {
     pub app_id: String,
     pub mch_id: String,
     pub merchant_serial_no: String,
-    pub merchant_private_key_path: PathBuf,
+    pub merchant_private_key_file: PathBuf,
     pub api_v3_key: String,
     pub public_key_id: String,
-    pub public_key_path: PathBuf,
+    pub public_key_file: PathBuf,
     pub notify_url: String,
 }
 
@@ -44,6 +50,15 @@ pub enum ConfigError {
     InvalidListenAddr(#[from] std::net::AddrParseError),
     #[error("invalid positive integer environment variable: {0}")]
     InvalidPositiveInteger(&'static str),
+    #[error("SHOP_NAME must contain between 1 and 100 characters")]
+    InvalidShopName,
+    #[error("SHOP_LOGO_FILE must contain a valid SVG image: {0}")]
+    UnsupportedShopLogo(PathBuf),
+    #[error("cannot read SHOP_LOGO_FILE {file}: {source}")]
+    UnreadableShopLogo {
+        file: PathBuf,
+        source: std::io::Error,
+    },
     #[error("incomplete payment configuration: {0}")]
     IncompletePaymentConfig(&'static str),
     #[error("PUBLIC_BASE_URL must use https when official WeChat Pay is enabled")]
@@ -59,8 +74,14 @@ impl AppConfig {
         let public_base_url =
             env::var("PUBLIC_BASE_URL").unwrap_or_else(|_| "http://localhost:3000".to_string());
         let web_return_url = env::var("WEB_RETURN_URL")
-            .unwrap_or_else(|_| "http://localhost:5173/delivery".to_string());
+            .unwrap_or_else(|_| "http://localhost:5173/orders".to_string());
         let web_dist_dir = required("WEB_DIST_DIR").map(PathBuf::from)?;
+        let shop_name = required("SHOP_NAME")?.trim().to_string();
+        if !(1..=100).contains(&shop_name.chars().count()) {
+            return Err(ConfigError::InvalidShopName);
+        }
+        let shop_logo_file = PathBuf::from(required("SHOP_LOGO_FILE")?);
+        validate_shop_logo(&shop_logo_file)?;
         let admin_key = required("ADMIN_KEY")?;
         let order_password_pepper = env::var("ORDER_PASSWORD_PEPPER")
             .unwrap_or_else(|_| "dev-insecure-change-me".to_string());
@@ -80,24 +101,24 @@ impl AppConfig {
             _ => None,
         };
 
-        let wechatpay_values = [
+        // 固定的容器内密钥文件位置不应决定支付方是否启用；是否启用只由业务凭据判断。
+        // 当五项业务凭据全部为空时忽略文件参数，使仅使用 ePay 的部署无需提供有效 PEM。
+        let wechatpay_credentials = [
             optional_nonempty("WXPAY_APP_ID"),
             optional_nonempty("WXPAY_MCH_ID"),
             optional_nonempty("WXPAY_MERCHANT_SERIAL_NO"),
-            optional_nonempty("WXPAY_MERCHANT_PRIVATE_KEY_PATH"),
             optional_nonempty("WXPAY_API_V3_KEY"),
             optional_nonempty("WXPAY_PUBLIC_KEY_ID"),
-            optional_nonempty("WXPAY_PUBLIC_KEY_PATH"),
         ];
-        let configured_wechatpay_values = wechatpay_values
+        let configured_wechatpay_values = wechatpay_credentials
             .iter()
             .filter(|value| value.is_some())
             .count();
         let wechatpay = if configured_wechatpay_values == 0 {
             None
-        } else if configured_wechatpay_values != wechatpay_values.len() {
+        } else if configured_wechatpay_values != wechatpay_credentials.len() {
             return Err(ConfigError::IncompletePaymentConfig(
-                "all WXPAY_* values must be configured together",
+                "all WXPAY credential values must be configured together",
             ));
         } else {
             if !public_base_url.starts_with("https://") {
@@ -107,14 +128,21 @@ impl AppConfig {
                 Some(app_id),
                 Some(mch_id),
                 Some(merchant_serial_no),
-                Some(merchant_private_key_path),
                 Some(api_v3_key),
                 Some(public_key_id),
-                Some(public_key_path),
-            ] = wechatpay_values
+            ] = wechatpay_credentials
             else {
                 unreachable!("WeChat Pay configuration completeness already checked")
             };
+            let merchant_private_key_file = optional_nonempty("WXPAY_MERCHANT_PRIVATE_KEY_FILE")
+                .ok_or(ConfigError::IncompletePaymentConfig(
+                    "WXPAY_MERCHANT_PRIVATE_KEY_FILE is required when WeChat Pay is enabled",
+                ))?;
+            let public_key_file = optional_nonempty("WXPAY_PUBLIC_KEY_FILE").ok_or(
+                ConfigError::IncompletePaymentConfig(
+                    "WXPAY_PUBLIC_KEY_FILE is required when WeChat Pay is enabled",
+                ),
+            )?;
             if api_v3_key.len() != 32 {
                 return Err(ConfigError::IncompletePaymentConfig(
                     "WXPAY_API_V3_KEY must contain exactly 32 bytes",
@@ -124,10 +152,10 @@ impl AppConfig {
                 app_id,
                 mch_id,
                 merchant_serial_no,
-                merchant_private_key_path: PathBuf::from(merchant_private_key_path),
+                merchant_private_key_file: PathBuf::from(merchant_private_key_file),
                 api_v3_key,
                 public_key_id,
-                public_key_path: PathBuf::from(public_key_path),
+                public_key_file: PathBuf::from(public_key_file),
                 notify_url: format!(
                     "{}/api/payments/wechatpay/notify",
                     public_base_url.trim_end_matches('/')
@@ -141,6 +169,8 @@ impl AppConfig {
             public_base_url,
             web_return_url,
             web_dist_dir,
+            shop_name,
+            shop_logo_file,
             admin_key,
             order_password_pepper,
             wechatpay_expire_minutes,
@@ -148,6 +178,30 @@ impl AppConfig {
             wechatpay,
         })
     }
+}
+
+/// Logo 只允许 SVG。不能仅相信宿主机文件名，因为 Compose 会把任意源文件映射到固定的
+/// 容器路径；因此启动时使用 XML 解析器检查真实内容和 SVG 根元素，失败时直接拒绝启动。
+fn validate_shop_logo(file: &Path) -> Result<(), ConfigError> {
+    let bytes = std::fs::read(file).map_err(|source| ConfigError::UnreadableShopLogo {
+        file: file.to_path_buf(),
+        source,
+    })?;
+    is_svg(&bytes)
+        .then_some(())
+        .ok_or_else(|| ConfigError::UnsupportedShopLogo(file.to_path_buf()))
+}
+
+fn is_svg(bytes: &[u8]) -> bool {
+    let Ok(xml) = std::str::from_utf8(bytes) else {
+        return false;
+    };
+    let Ok(document) = roxmltree::Document::parse(xml) else {
+        return false;
+    };
+    let root = document.root_element();
+    let tag = root.tag_name();
+    tag.name() == "svg" && matches!(tag.namespace(), None | Some("http://www.w3.org/2000/svg"))
 }
 
 fn required(name: &'static str) -> Result<String, ConfigError> {
@@ -159,4 +213,24 @@ fn optional_nonempty(name: &'static str) -> Option<String> {
         .ok()
         .map(|value| value.trim().to_string())
         .filter(|value| !value.is_empty())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn shop_logo_content_accepts_svg_without_relying_on_extension() {
+        assert!(is_svg(
+            br#"<?xml version="1.0"?><svg xmlns="http://www.w3.org/2000/svg"></svg>"#
+        ));
+        assert!(is_svg(br#"<svg viewBox="0 0 10 10"></svg>"#));
+    }
+
+    #[test]
+    fn shop_logo_content_rejects_non_svg_or_invalid_xml() {
+        assert!(!is_svg(&[0x89, 0x50, 0x4E, 0x47]));
+        assert!(!is_svg(b"<html></html>"));
+        assert!(!is_svg(b"<svg>"));
+    }
 }

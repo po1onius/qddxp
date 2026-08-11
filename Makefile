@@ -13,8 +13,10 @@ API_PORT ?= 3000
 LISTEN_ADDR ?= 0.0.0.0:$(API_PORT)
 DATABASE_URL ?= postgres://$(POSTGRES_USER):$(POSTGRES_PASSWORD)@localhost:$(POSTGRES_PORT)/$(POSTGRES_DB)
 PUBLIC_BASE_URL ?= http://localhost:$(API_PORT)
-WEB_RETURN_URL ?= http://localhost:$(API_PORT)/delivery
+WEB_RETURN_URL ?= http://localhost:$(API_PORT)/orders
 WEB_DIST_DIR ?= $(CURDIR)/web/dist
+SHOP_NAME ?=
+SHOP_LOGO_FILE ?= $(CURDIR)/deploy/assets/shop-logo.svg
 ADMIN_KEY ?= change-me
 ORDER_PASSWORD_PEPPER ?= dev-insecure-change-me
 WXPAY_EXPIRE_MINUTES ?= 15
@@ -26,10 +28,10 @@ EPAY_KEY ?=
 WXPAY_APP_ID ?=
 WXPAY_MCH_ID ?=
 WXPAY_MERCHANT_SERIAL_NO ?=
-WXPAY_MERCHANT_PRIVATE_KEY_PATH ?=
+WXPAY_MERCHANT_PRIVATE_KEY_FILE ?= $(CURDIR)/deploy/secrets/disabled-placeholder
 WXPAY_API_V3_KEY ?=
 WXPAY_PUBLIC_KEY_ID ?=
-WXPAY_PUBLIC_KEY_PATH ?=
+WXPAY_PUBLIC_KEY_FILE ?= $(CURDIR)/deploy/secrets/disabled-placeholder
 
 .PHONY: help dev srv web-build db-up
 
@@ -46,6 +48,8 @@ srv: db-up web-build ## Start the backend with local development environment var
 		PUBLIC_BASE_URL='$(PUBLIC_BASE_URL)' \
 		WEB_RETURN_URL='$(WEB_RETURN_URL)' \
 		WEB_DIST_DIR='$(WEB_DIST_DIR)' \
+		SHOP_NAME='$(SHOP_NAME)' \
+		SHOP_LOGO_FILE='$(SHOP_LOGO_FILE)' \
 		ADMIN_KEY='$(ADMIN_KEY)' \
 		ORDER_PASSWORD_PEPPER='$(ORDER_PASSWORD_PEPPER)' \
 		WXPAY_EXPIRE_MINUTES='$(WXPAY_EXPIRE_MINUTES)' \
@@ -56,10 +60,10 @@ srv: db-up web-build ## Start the backend with local development environment var
 		WXPAY_APP_ID='$(WXPAY_APP_ID)' \
 		WXPAY_MCH_ID='$(WXPAY_MCH_ID)' \
 		WXPAY_MERCHANT_SERIAL_NO='$(WXPAY_MERCHANT_SERIAL_NO)' \
-		WXPAY_MERCHANT_PRIVATE_KEY_PATH='$(WXPAY_MERCHANT_PRIVATE_KEY_PATH)' \
+		WXPAY_MERCHANT_PRIVATE_KEY_FILE='$(WXPAY_MERCHANT_PRIVATE_KEY_FILE)' \
 		WXPAY_API_V3_KEY='$(WXPAY_API_V3_KEY)' \
 		WXPAY_PUBLIC_KEY_ID='$(WXPAY_PUBLIC_KEY_ID)' \
-		WXPAY_PUBLIC_KEY_PATH='$(WXPAY_PUBLIC_KEY_PATH)' \
+		WXPAY_PUBLIC_KEY_FILE='$(WXPAY_PUBLIC_KEY_FILE)' \
 		cargo run
 
 web-build: ## Build frontend static assets served by the backend.

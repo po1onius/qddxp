@@ -5,12 +5,13 @@ pub mod wechatpay;
 
 use axum::{
     Json, Router,
-    http::StatusCode,
+    http::{HeaderValue, StatusCode, header::CONTENT_TYPE},
     routing::{get, patch, post},
 };
 use serde_json::json;
 use tower_http::{
     services::{ServeDir, ServeFile},
+    set_header::SetResponseHeader,
     trace::{DefaultMakeSpan, DefaultOnFailure, DefaultOnRequest, DefaultOnResponse, TraceLayer},
 };
 use tracing::Level;
@@ -20,10 +21,22 @@ use crate::AppState;
 pub fn router(state: AppState) -> Router {
     let web_dist_dir = state.config.web_dist_dir.clone();
     let index_file = web_dist_dir.join("index.html");
-    let static_files = ServeDir::new(web_dist_dir).not_found_service(ServeFile::new(index_file));
+    // BrowserRouter 的直接访问与刷新都应返回 index.html 的正常 200 响应；
+    // `not_found_service` 会强制改成 404，因此 SPA 回退必须使用保留原状态码的 `fallback`。
+    let static_files = ServeDir::new(web_dist_dir).fallback(ServeFile::new(index_file));
+    // Logo 已在启动阶段解析并验证为 SVG。这里显式覆盖响应头，确保本地开发即使传入
+    // 无扩展名文件也会按 SVG 提供，且响应类型不受宿主机文件名影响。
+    let shop_logo = SetResponseHeader::overriding(
+        ServeFile::new(state.config.shop_logo_file.clone()),
+        CONTENT_TYPE,
+        HeaderValue::from_static("image/svg+xml"),
+    );
 
     let api = Router::new()
+        .route("/storefront", get(public::get_storefront))
+        .route_service("/storefront/logo", shop_logo)
         .route("/products", get(public::list_products))
+        .route("/products/{id}", get(public::get_product))
         .route("/payment-methods", get(public::list_payment_methods))
         .route("/orders", post(public::create_order))
         .route("/orders/by-contact", post(public::list_orders_by_contact))

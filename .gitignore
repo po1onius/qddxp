@@ -11,3 +11,4 @@ dist/
 .vscode/
 deploy/secrets/*
 !deploy/secrets/.gitkeep
+!deploy/secrets/disabled-placeholder
