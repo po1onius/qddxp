@@ -1,9 +1,11 @@
 SHELL := /usr/bin/env bash
-.DEFAULT_GOAL := help
 
 PODMAN ?= podman
-POSTGRES_IMAGE ?= docker.io/library/postgres:18.4-alpine
-DB_CONTAINER ?= qddxp-postgres
+# 本地开发与生产共用 deploy/compose.yml，通过独立项目名隔离容器与数据卷，
+# 保证测试环境与生产配置一致（单一 compose 文件，无同步漂移问题）。
+PODMAN_COMPOSE ?= $(PODMAN) compose -p '$(COMPOSE_PROJECT)' -f '$(CURDIR)/deploy/compose.yml'
+COMPOSE_PROJECT ?= qddxp-dev
+DB_CONTAINER_NAME ?= qddxp-dev-postgres
 POSTGRES_DB ?= qddxp
 POSTGRES_USER ?= postgres
 POSTGRES_PASSWORD ?= postgres
@@ -15,7 +17,7 @@ DATABASE_URL ?= postgres://$(POSTGRES_USER):$(POSTGRES_PASSWORD)@localhost:$(POS
 PUBLIC_BASE_URL ?= http://localhost:$(API_PORT)
 WEB_RETURN_URL ?= http://localhost:$(API_PORT)/orders
 WEB_DIST_DIR ?= $(CURDIR)/web/dist
-SHOP_NAME ?= '小白羊AI小铺'
+SHOP_NAME ?= 小白羊AI小铺
 SHOP_LOGO_FILE ?= $(CURDIR)/deploy/assets/shop-logo.svg
 ADMIN_KEY ?= change-me
 ORDER_PASSWORD_PEPPER ?= dev-insecure-change-me
@@ -33,14 +35,25 @@ WXPAY_API_V3_KEY ?=
 WXPAY_PUBLIC_KEY_ID ?=
 WXPAY_PUBLIC_KEY_FILE ?= $(CURDIR)/deploy/secrets/disabled-placeholder
 
-.PHONY: help dev srv web-build db-up
+# podman-compose 在解析 compose 文件时即插值全部变量（含 :? 必填项），即使只启动
+# db 服务也要求这些变量存在。导出后 make 传参与 compose 解析、容器配置保持一致。
+export POSTGRES_DB POSTGRES_USER POSTGRES_PASSWORD POSTGRES_PORT DB_CONTAINER_NAME \
+	SHOP_NAME SHOP_LOGO_FILE \
+	WXPAY_MERCHANT_PRIVATE_KEY_FILE WXPAY_PUBLIC_KEY_FILE
 
-help: ## Show available commands.
-	@awk 'BEGIN {FS = ":.*## "}; /^[a-zA-Z0-9_.-]+:.*## / {printf "  %-14s %s\n", $$1, $$2}' $(MAKEFILE_LIST)
+.PHONY: dev
 
-dev: srv ## Build web assets and start the backend that serves the app.
-
-srv: db-up web-build ## Start the backend with local development environment variables.
+# 唯一默认目标：启动本地数据库（podman compose，只起 db 服务）、构建前端并运行后端。
+dev:
+	@$(PODMAN_COMPOSE) up -d db
+	@echo "waiting for database..."
+	@until $(PODMAN) exec '$(DB_CONTAINER_NAME)' pg_isready -U '$(POSTGRES_USER)' -d '$(POSTGRES_DB)' >/dev/null 2>&1; do sleep 1; done
+	@echo "initializing pgBackRest stanza if missing (db is configured with WAL archiving)..."
+	@# stanza-create 幂等：stanza 已存在且有效时直接成功返回。
+	@$(PODMAN) exec '$(DB_CONTAINER_NAME)' pgbackrest --stanza=qddxp --log-level-console=info stanza-create
+	@echo "database ready: $(DATABASE_URL)"
+	@echo "building web assets..."
+	@cd web && npm run build
 	@echo "app: http://localhost:$(API_PORT)"
 	@cd srv && \
 		DATABASE_URL='$(DATABASE_URL)' \
@@ -65,22 +78,3 @@ srv: db-up web-build ## Start the backend with local development environment var
 		WXPAY_PUBLIC_KEY_ID='$(WXPAY_PUBLIC_KEY_ID)' \
 		WXPAY_PUBLIC_KEY_FILE='$(WXPAY_PUBLIC_KEY_FILE)' \
 		cargo run
-
-web-build: ## Build frontend static assets served by the backend.
-	@cd web && npm run build
-
-db-up: ## Start local Postgres on localhost:5432.
-	@if $(PODMAN) inspect '$(DB_CONTAINER)' >/dev/null 2>&1; then \
-		$(PODMAN) start '$(DB_CONTAINER)' >/dev/null; \
-	else \
-		$(PODMAN) run -d \
-			--name '$(DB_CONTAINER)' \
-			-e POSTGRES_DB='$(POSTGRES_DB)' \
-			-e POSTGRES_USER='$(POSTGRES_USER)' \
-			-e POSTGRES_PASSWORD='$(POSTGRES_PASSWORD)' \
-			-p '$(POSTGRES_PORT):5432' \
-			'$(POSTGRES_IMAGE)' >/dev/null; \
-	fi
-	@echo "waiting for database..."
-	@until $(PODMAN) exec '$(DB_CONTAINER)' pg_isready -U '$(POSTGRES_USER)' -d '$(POSTGRES_DB)' >/dev/null 2>&1; do sleep 1; done
-	@echo "database ready: $(DATABASE_URL)"

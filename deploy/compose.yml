@@ -5,8 +5,14 @@ services:
     # Percona 发行镜像同时包含 PostgreSQL 与 pgBackRest，数据库进程才能直接通过
     # archive_command 持续归档 WAL，无需维护额外的定制数据库镜像。
     image: *postgres-image
-    container_name: qddxp-pgsql
+    # 本地开发（make db-up）与生产共用本文件；默认沿用生产容器名，
+    # 本地开发通过 DB_CONTAINER_NAME 覆盖，避免同机两套实例命名冲突。
+    container_name: ${DB_CONTAINER_NAME:-qddxp-pgsql}
     restart: unless-stopped
+    ports:
+      # 仅绑定回环地址：生产用于宿主机上的排查与备份工具，本地开发的后端
+      # 通过 localhost 直连。端口号由 POSTGRES_PORT 控制，与 Makefile 一致。
+      - "127.0.0.1:${POSTGRES_PORT:-5432}:5432"
     environment:
       POSTGRES_DB: ${POSTGRES_DB:-qddxp}
       POSTGRES_USER: ${POSTGRES_USER:-postgres}

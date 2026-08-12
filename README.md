@@ -49,7 +49,7 @@
 ├── web/                  # React 前端
 │   └── src/              # 顾客端 + 管理后台
 ├── deploy/
-│   ├── compose.yml       # docker compose 部署
+│   ├── compose.yml       # docker compose 部署（本地开发数据库也由它启动）
 │   ├── assets/           # 示例店铺 Logo
 │   ├── infra/pgbackrest/ # PostgreSQL 备份、WAL 归档与恢复脚本
 │   ├── secrets/          # 微信支付 PEM 文件（默认被 Git 忽略）
@@ -63,12 +63,16 @@
 前置要求：Rust 工具链、Node.js、podman（或 docker）。
 
 ```bash
-# 一键启动：启动 Postgres、构建前端、运行后端
-make dev SHOP_NAME='我的店铺' SHOP_LOGO_FILE="$PWD/deploy/assets/shop-logo.svg"
+# 一键启动：podman compose 启动本地 Postgres、构建前端、运行后端
+make SHOP_NAME='我的店铺' SHOP_LOGO_FILE="$PWD/deploy/assets/shop-logo.svg"
 
-# 或分开运行
-make db-up && make srv      # 后端（http://localhost:3000）
-cd web && npm install && npm run dev   # 前端开发服务器（http://localhost:5173，/api 代理到后端）
+# 前端开发服务器（http://localhost:5173，/api 代理到后端）
+cd web && npm install && npm run dev
+```
+
+`make` 只启动 `deploy/compose.yml` 中的 `db` 服务（不启动备份），项目名为 `qddxp-dev`，
+数据落在 `qddxp-dev_*` 命名卷中，与生产部署的 `deploy_*` 卷相互隔离。停止本地数据库：
+`podman stop qddxp-dev-postgres`（数据保留，下次 `make` 会自动重新启动）。
 ```
 
 配置通过环境变量注入，开发默认值见 `Makefile`，完整变量见下表。
@@ -81,6 +85,9 @@ docker compose -f deploy/compose.yml up -d --build
 ```
 
 服务启动后访问 `http://<主机>:8080`，健康检查 `GET /health`。
+
+数据库同时将 5432 映射到宿主机回环地址（`POSTGRES_PORT` 可覆盖），便于宿主机上的
+排查与备份工具直连，也供本地开发（`make`）使用。
 
 ### PostgreSQL 备份
 
