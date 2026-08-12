@@ -454,6 +454,7 @@ mod tests {
             shop_logo_file: PathBuf::from("test-logo"),
             admin_key: "test-admin-key".to_string(),
             order_password_pepper: "test-password-pepper".to_string(),
+            rate_limit_trusted_proxy_cidrs: Vec::new(),
             wechatpay_expire_minutes: 15,
             epay: Some(EpayConfig {
                 gateway: "https://pay.example.com/".to_string(),

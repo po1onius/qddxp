@@ -6,7 +6,7 @@ mod http;
 mod payments;
 mod security;
 
-use std::sync::Arc;
+use std::{net::SocketAddr, sync::Arc};
 
 use axum::extract::DefaultBodyLimit;
 use config::AppConfig;
@@ -48,6 +48,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         shop_logo_file = %config.shop_logo_file.display(),
         epay_configured = config.epay.is_some(),
         wechatpay_configured = config.wechatpay.is_some(),
+        rate_limit_trusted_proxy_cidrs = ?config.rate_limit_trusted_proxy_cidrs,
         "application config loaded"
     );
     db::migrate::run_pending(&config.database_url)?;
@@ -108,9 +109,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let listener = TcpListener::bind(config.listen_addr).await?;
 
     tracing::info!("listening on {}", config.listen_addr);
-    axum::serve(listener, app)
-        .with_graceful_shutdown(shutdown_signal())
-        .await?;
+    // Peer-IP 限流依赖每条 TCP 连接的真实对端地址；不能使用不携带 ConnectInfo 的
+    // 默认 make service，否则中间件无法建立安全的客户端身份键。
+    axum::serve(
+        listener,
+        app.into_make_service_with_connect_info::<SocketAddr>(),
+    )
+    .with_graceful_shutdown(shutdown_signal())
+    .await?;
 
     Ok(())
 }

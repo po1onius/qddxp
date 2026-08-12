@@ -94,6 +94,7 @@ docker compose -f deploy/compose.yml up -d --build
 | `SHOP_NAME` | 是 | 店铺名称，1–100 个字符 |
 | `SHOP_LOGO_FILE` | 是 | SVG Logo 文件，启动时校验真实内容；Docker 部署时填写宿主机文件路径 |
 | `ORDER_PASSWORD_PEPPER` | 否 | 订单密码哈希 pepper，生产环境务必修改 |
+| `RATE_LIMIT_TRUSTED_PROXY_CIDRS` | 否 | 允许提供 `X-Forwarded-For` 的反向代理 CIDR，多个值用逗号分隔；直连部署留空 |
 | `WXPAY_EXPIRE_MINUTES` | 否 | 微信官方 Native 支付结束分钟数，默认 15，范围 1–120；ePay 固定为 3 分钟 |
 | `EPAY_GATEWAY` / `EPAY_PID` / `EPAY_KEY` | 否 | 三者都设置才启用易支付 |
 | `WXPAY_APP_ID` / `WXPAY_MCH_ID` | 否 | 微信支付官方直连的应用 ID 与直连商户号 |
@@ -112,6 +113,13 @@ docker compose -f deploy/compose.yml up -d --build
 `WXPAY_MERCHANT_PRIVATE_KEY_FILE`、`WXPAY_PUBLIC_KEY_FILE`。Compose 分别把它们
 只读映射到 Dockerfile 预设的容器路径，不再挂载整个目录，也无需配置容器内路径。
 应用启动时会解析 Logo 内容并确认其为 SVG，而不是信任文件扩展名。
+
+创建订单接口 `POST /api/orders` 使用固定窗口，按客户端 IP 限制为每 3 分钟 5 次；
+第 6 次请求返回 `429`，其他接口不参与应用层限流。直连部署根据 TCP 对端 IP 计数；
+部署在反向代理后时，需要将代理的精确地址（优先 `/32` 或 `/128`）配置到
+`RATE_LIMIT_TRUSTED_PROXY_CIDRS`，并让代理正确
+追加或覆盖 `X-Forwarded-For`。不要填写不受控制的客户端网段。限流状态保存在进程
+内，多实例部署时每个实例独立计数。
 
 ### 管理后台会话
 

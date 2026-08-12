@@ -7,6 +7,7 @@ pub mod wechatpay;
 use axum::{
     Json, Router,
     http::{HeaderValue, StatusCode, header::CONTENT_TYPE},
+    middleware,
     routing::{get, patch, post},
 };
 use serde_json::json;
@@ -17,9 +18,12 @@ use tower_http::{
 };
 use tracing::Level;
 
-use crate::AppState;
+use crate::{AppState, http::rate_limit};
 
 pub fn router(state: AppState) -> Router {
+    let trusted_proxy_cidrs = &state.config.rate_limit_trusted_proxy_cidrs;
+    let order_creation_limiter = rate_limit::OrderCreationRateLimiter::new(trusted_proxy_cidrs);
+
     let web_dist_dir = state.config.web_dist_dir.clone();
     let index_file = web_dist_dir.join("index.html");
     // BrowserRouter 的直接访问与刷新都应返回 index.html 的正常 200 响应；
@@ -39,7 +43,13 @@ pub fn router(state: AppState) -> Router {
         .route("/products", get(public::list_products))
         .route("/products/{id}", get(public::get_product))
         .route("/payment-methods", get(public::list_payment_methods))
-        .route("/orders", post(public::create_order))
+        .route(
+            "/orders",
+            post(public::create_order).layer(middleware::from_fn_with_state(
+                order_creation_limiter,
+                rate_limit::enforce_order_creation_limit,
+            )),
+        )
         .route("/orders/by-contact", post(public::list_orders_by_contact))
         .route("/orders/query", post(public::query_order))
         .route(

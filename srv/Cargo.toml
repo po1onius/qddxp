@@ -12,8 +12,10 @@ diesel = { version = "2.3", features = ["chrono", "serde_json", "uuid", "postgre
 diesel-async = { version = "0.9", features = ["postgres", "bb8"] }
 diesel_migrations = "2.3"
 dotenvy = "0.15"
+dashmap = "6.2.1"
 hex = "0.4"
 hmac = "0.12"
+ipnet = "2.12.1"
 md5 = "0.7"
 reqwest = { version = "0.13.4", default-features = false, features = ["json", "rustls"] }
 roxmltree = "0.21.1"
@@ -24,7 +26,7 @@ sha2 = "0.10"
 strum = { version = "0.27", features = ["derive"] }
 thiserror = "2"
 time = "0.3.55"
-tokio = { version = "1", features = ["macros", "rt-multi-thread", "signal"] }
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "signal", "time"] }
 tower-http = { version = "0.6", features = ["cors", "fs", "set-header", "trace"] }
 tower-sessions = { version = "0.14.0", default-features = false, features = ["axum-core"] }
 tower-sessions-moka-store = "0.15.0"
@@ -32,3 +34,6 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 urlencoding = "2"
 uuid = { version = "1", features = ["serde", "v4"] }
+
+[dev-dependencies]
+tower = { version = "0.5", features = ["util"] }

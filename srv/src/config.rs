@@ -4,6 +4,7 @@ use std::{
     path::{Path, PathBuf},
 };
 
+use ipnet::IpNet;
 use thiserror::Error;
 
 #[derive(Debug, Clone)]
@@ -17,6 +18,9 @@ pub struct AppConfig {
     pub shop_logo_file: PathBuf,
     pub admin_key: String,
     pub order_password_pepper: String,
+    /// 只有来自这些网段的直接连接才允许使用 X-Forwarded-For 识别真实客户端。
+    /// 留空时始终使用 TCP 对端 IP，避免公网请求伪造代理头绕过限流。
+    pub rate_limit_trusted_proxy_cidrs: Vec<IpNet>,
     /// 微信官方 Native 支付结束时间。ePay 使用固定三分钟的本地库存预占期限，二者不能共用配置。
     pub wechatpay_expire_minutes: i64,
     pub epay: Option<EpayConfig>,
@@ -50,6 +54,8 @@ pub enum ConfigError {
     InvalidListenAddr(#[from] std::net::AddrParseError),
     #[error("invalid positive integer environment variable: {0}")]
     InvalidPositiveInteger(&'static str),
+    #[error("invalid CIDR in RATE_LIMIT_TRUSTED_PROXY_CIDRS: {0}")]
+    InvalidTrustedProxyCidr(String),
     #[error("SHOP_NAME must contain between 1 and 100 characters")]
     InvalidShopName,
     #[error("SHOP_LOGO_FILE must contain a valid SVG image: {0}")]
@@ -85,6 +91,8 @@ impl AppConfig {
         let admin_key = required("ADMIN_KEY")?;
         let order_password_pepper = env::var("ORDER_PASSWORD_PEPPER")
             .unwrap_or_else(|_| "dev-insecure-change-me".to_string());
+        let rate_limit_trusted_proxy_cidrs =
+            parse_trusted_proxy_cidrs(env::var("RATE_LIMIT_TRUSTED_PROXY_CIDRS").ok().as_deref())?;
         let wechatpay_expire_minutes = env::var("WXPAY_EXPIRE_MINUTES")
             .unwrap_or_else(|_| "15".to_string())
             .parse::<i64>()
@@ -173,11 +181,25 @@ impl AppConfig {
             shop_logo_file,
             admin_key,
             order_password_pepper,
+            rate_limit_trusted_proxy_cidrs,
             wechatpay_expire_minutes,
             epay,
             wechatpay,
         })
     }
+}
+
+fn parse_trusted_proxy_cidrs(value: Option<&str>) -> Result<Vec<IpNet>, ConfigError> {
+    value
+        .unwrap_or_default()
+        .split(',')
+        .map(str::trim)
+        .filter(|cidr| !cidr.is_empty())
+        .map(|cidr| {
+            cidr.parse::<IpNet>()
+                .map_err(|_| ConfigError::InvalidTrustedProxyCidr(cidr.to_string()))
+        })
+        .collect()
 }
 
 /// Logo 只允许 SVG。不能仅相信宿主机文件名，因为 Compose 会把任意源文件映射到固定的
@@ -233,5 +255,19 @@ mod tests {
         assert!(!is_svg(&[0x89, 0x50, 0x4E, 0x47]));
         assert!(!is_svg(b"<html></html>"));
         assert!(!is_svg(b"<svg>"));
+    }
+
+    #[test]
+    fn trusted_proxy_cidrs_are_trimmed_and_validated() {
+        assert_eq!(
+            parse_trusted_proxy_cidrs(Some("127.0.0.1/32, 10.0.0.0/8"))
+                .expect("合法 CIDR 应当可以解析"),
+            vec![
+                "127.0.0.1/32".parse().unwrap(),
+                "10.0.0.0/8".parse().unwrap()
+            ]
+        );
+        assert!(parse_trusted_proxy_cidrs(Some("10.0.0.1")).is_err());
+        assert!(parse_trusted_proxy_cidrs(Some("")).unwrap().is_empty());
     }
 }

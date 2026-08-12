@@ -19,6 +19,7 @@ use uuid::Uuid;
 use crate::config::WechatPayConfig;
 
 const WECHATPAY_API_BASE_URL: &str = "https://api.mch.weixin.qq.com";
+const WECHATPAY_SERIAL_HEADER: &str = "Wechatpay-Serial";
 
 #[derive(Debug, Error)]
 pub enum WechatPayError {
@@ -393,16 +394,12 @@ impl WechatPayClient {
             method = method.as_str(),
             path,
             has_body = !body.is_empty(),
+            wechatpay_public_key_id = %self.public_key_id,
             "sending official WeChat Pay API v3 request"
         );
 
         let response = self
-            .http
-            .request(method.clone(), format!("{WECHATPAY_API_BASE_URL}{path}"))
-            .header(reqwest::header::AUTHORIZATION, authorization)
-            .header(reqwest::header::ACCEPT, "application/json")
-            .header(reqwest::header::CONTENT_TYPE, "application/json")
-            .body(body)
+            .build_http_request(method.clone(), path, authorization, body)
             .send()
             .await?;
         let status = response.status();
@@ -433,6 +430,24 @@ impl WechatPayClient {
         }
         Ok(response_body)
     }
+
+    fn build_http_request(
+        &self,
+        method: Method,
+        path: &str,
+        authorization: String,
+        body: String,
+    ) -> reqwest::RequestBuilder {
+        self.http
+            .request(method, format!("{WECHATPAY_API_BASE_URL}{path}"))
+            .header(reqwest::header::AUTHORIZATION, authorization)
+            // 公钥模式必须携带微信支付公钥 ID。它与 Authorization 中的商户证书
+            // serial_no 含义不同，统一在底层添加可避免下单、查单、关单接口遗漏。
+            .header(WECHATPAY_SERIAL_HEADER, &self.public_key_id)
+            .header(reqwest::header::ACCEPT, "application/json")
+            .header(reqwest::header::CONTENT_TYPE, "application/json")
+            .body(body)
+    }
 }
 
 fn signature_header<'a>(
@@ -462,12 +477,18 @@ mod tests {
         aead::{Aead, KeyInit, Payload},
     };
     use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64_STANDARD};
-    use reqwest::header::{HeaderMap, HeaderValue};
+    use reqwest::{
+        Method,
+        header::{HeaderMap, HeaderValue},
+    };
     use rsa::{Pkcs1v15Sign, RsaPrivateKey, RsaPublicKey, rand_core::OsRng};
     use serde::Deserialize;
     use sha2::{Digest, Sha256};
 
-    use super::{EncryptedResource, WechatPayClient, WechatPayError, canonical_request_message};
+    use super::{
+        EncryptedResource, WECHATPAY_SERIAL_HEADER, WechatPayClient, WechatPayError,
+        canonical_request_message,
+    };
 
     const TEST_API_V3_KEY: [u8; 32] = *b"0123456789abcdef0123456789abcdef";
 
@@ -499,6 +520,28 @@ mod tests {
                 r#"{"mchid":"1900009191"}"#,
             ),
             "POST\n/v3/pay/transactions/native\n1550114436\n593BEC0C930BF1AFEB40B4A08C8FB242\n{\"mchid\":\"1900009191\"}\n"
+        );
+    }
+
+    #[test]
+    fn public_key_mode_request_contains_wechatpay_serial_header() {
+        let client = test_client();
+        let request = client
+            .build_http_request(
+                Method::GET,
+                "/v3/pay/transactions/out-trade-no/order-1?mchid=1900000001",
+                "WECHATPAY2-SHA256-RSA2048 test-authorization".to_string(),
+                String::new(),
+            )
+            .build()
+            .expect("build test request");
+
+        assert_eq!(
+            request
+                .headers()
+                .get(WECHATPAY_SERIAL_HEADER)
+                .and_then(|value| value.to_str().ok()),
+            Some("PUB_KEY_ID_TEST")
         );
     }
 
