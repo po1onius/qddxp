@@ -28,7 +28,7 @@
 
 | 层 | 技术 |
 | --- | --- |
-| 后端 | Rust · axum · diesel (async) · PostgreSQL 18 · tower-http · tracing |
+| 后端 | Rust · axum · diesel (async) · Percona PostgreSQL 18.4 / pgBackRest · tower-http · tracing |
 | 前端 | React 18 · React Router 7 · TypeScript · Vite · Tailwind CSS |
 | 支付 | 易支付 MD5 协议；微信支付官方 API v3 Native（RSA-SHA256 / AES-256-GCM） |
 | 部署 | Docker 多阶段构建 · docker compose |
@@ -51,6 +51,7 @@
 ├── deploy/
 │   ├── compose.yml       # docker compose 部署
 │   ├── assets/           # 示例店铺 Logo
+│   ├── infra/pgbackrest/ # PostgreSQL 备份、WAL 归档与恢复脚本
 │   ├── secrets/          # 微信支付 PEM 文件（默认被 Git 忽略）
 │   └── .env.example      # 环境变量示例
 ├── Dockerfile            # 多阶段构建（Rust + Node → 精简运行镜像）
@@ -81,6 +82,125 @@ docker compose -f deploy/compose.yml up -d --build
 
 服务启动后访问 `http://<主机>:8080`，健康检查 `GET /health`。
 
+### PostgreSQL 备份
+
+Compose 使用同时包含 PostgreSQL 18.4 和 pgBackRest 的 Percona 发行镜像。正常执行
+`docker compose up` 时会一起启动 `pgbackrest-backup`：全新仓库立即建立第一份 full
+备份，之后按 UTC 时间执行以下调度：
+
+- 每周日 03:00 后执行一次 full；
+- 其余每天 03:00 后执行一次 diff；
+- PostgreSQL 持续通过 `archive_command` 归档 WAL；低写入场景也至少每 60 秒尝试
+  切换一次 WAL。
+
+调度器每五分钟检查一次，容器在计划时刻停机时会在恢复运行后补做当前周期缺失的
+备份。`.env` 中的 `PGBR_SCHEDULE_HOUR_UTC` 和
+`PGBR_CHECK_INTERVAL_SECONDS` 可以调整计划小时和检查间隔。仓库默认保留最近四个
+full 及其关联的 diff 与恢复所需 WAL，当前不加密。
+
+查看备份日志、检查仓库和列出备份：
+
+```bash
+docker compose -f deploy/compose.yml logs -f pgbackrest-backup
+docker compose -f deploy/compose.yml exec pgbackrest-backup \
+  pgbackrest --stanza=qddxp check
+docker compose -f deploy/compose.yml exec pgbackrest-backup \
+  pgbackrest --stanza=qddxp info
+```
+
+备份容器只读挂载在线数据卷，并通过共享 Unix Socket 执行 PostgreSQL 控制查询；数据库
+容器负责 WAL 归档，备份容器负责基础备份。两者使用同一个 Percona 镜像，避免
+PostgreSQL 与 pgBackRest 版本漂移。
+
+本次从官方 `postgres:18.4-alpine` 切换到 Percona 镜像后，PostgreSQL 主版本与
+版本化数据目录结构保持不变，但容器内 PostgreSQL 用户的 UID/GID 可能不同。已有
+`qddxp_db_data` 如果在首次启动时报 `Permission denied`，应停止服务并手工调整准确
+卷内集群目录的属主；不要修改代码或让数据库以 root 身份运行来绕过权限：
+
+```bash
+docker compose -f deploy/compose.yml down
+docker volume ls
+
+# 将占位符替换为上一步核对出的 qddxp_db_data 实际卷名后再执行。
+docker run --rm --user root \
+  -v <核对无误的_qddxp_db_data_实际卷名>:/data/db \
+  percona/percona-distribution-postgresql:18.4-5 \
+  chown -R 26:26 /data/db/18/docker
+
+docker compose -f deploy/compose.yml up -d --build
+```
+
+调整属主不会转换 PostgreSQL 主版本，也不能替代备份；操作已有数据卷前应先确认数据
+已经另行保全。
+
+> `qddxp_pgbackrest_repository` 默认仍是同一容器主机上的 Compose 命名卷，只能应对
+> 数据库逻辑损坏或数据卷损坏，不能抵御整机磁盘丢失。正式部署应将仓库迁移到独立
+> 持久磁盘，或改用 pgBackRest 支持的对象存储仓库。
+
+### PostgreSQL 备份恢复
+
+`pgbackrest-restore` 位于 `restore` profile，日常启动不会运行。它是停机灾难恢复的
+一次性任务：只读访问备份仓库，并将物理文件恢复到正式 `qddxp_db_data`。脚本不会
+替运维人员停止或启动服务。
+
+恢复前先停止应用、备份调度器和数据库。恢复脚本还会通过 Compose 内部网络检查
+`db:5432`；只要 PostgreSQL 正在接受连接或处于启动、停止、恢复过程，就会拒绝操作：
+
+```bash
+docker compose -f deploy/compose.yml stop qddxp pgbackrest-backup db
+```
+
+恢复脚本要求正式 PGDATA 是空目录，不会自动删除、清空或覆盖故障现场。先核对准确
+卷名，再把原数据复制到调查目录或外部存储。只有确认不再需要原 PGDATA 后才能删除
+对应卷。以下是开发阶段重建数据卷的示例，执行会永久删除原数据库，但不得删除
+`qddxp_pgbackrest_repository` 仓库卷：
+
+```bash
+# 停止的容器仍会占用数据卷，因此删除卷前先移除数据库与备份容器。
+docker compose -f deploy/compose.yml rm -f pgbackrest-backup
+docker compose -f deploy/compose.yml rm -f db
+docker volume ls
+
+# 实际名称受 Compose 项目名影响，常见为 deploy_qddxp_db_data；必须核对后手动执行。
+docker volume rm <核对无误的_qddxp_db_data_实际卷名>
+```
+
+恢复最新备份的物理文件：
+
+```bash
+docker compose -f deploy/compose.yml --profile restore run --rm pgbackrest-restore
+```
+
+按时间做 PITR 时，目标时间必须包含时区：
+
+```bash
+PGBR_RESTORE_TYPE=time \
+PGBR_RESTORE_TARGET='2026-08-12 03:15:00+00' \
+docker compose -f deploy/compose.yml --profile restore run --rm pgbackrest-restore
+```
+
+也可以通过 `PGBR_RESTORE_SET` 指定 `pgbackrest info` 中显示的真实备份标签，或将
+`PGBR_RESTORE_TYPE` 设置为 `lsn` 并提供目标 LSN。默认的 `latest` 表示不传
+`--set`，由 pgBackRest 选择最新可用备份。
+
+`pgbackrest restore` 完成后只恢复了基础文件和恢复配置，WAL 尚未由 PostgreSQL 完整
+回放。随后单独启动数据库并观察日志；确认 archive recovery 完成且数据库可以正常
+读写后，再启动备份调度器和应用：
+
+```bash
+docker compose -f deploy/compose.yml up -d db
+docker compose -f deploy/compose.yml logs -f db
+
+# 另开终端确认恢复结束；结果应为 f。
+docker compose -f deploy/compose.yml exec db sh -c \
+  'psql -U "$POSTGRES_USER" -d "$POSTGRES_DB" -c "select pg_is_in_recovery();"'
+
+docker compose -f deploy/compose.yml up -d pgbackrest-backup qddxp
+```
+
+如果 PostgreSQL 启动或 WAL 回放失败，不要启动应用，也不要再次覆盖当前 PGDATA；应
+保留日志和故障现场，排查备份仓库、恢复目标与 WAL 连续性。
+
 ## 环境变量
 
 | 变量 | 必填 | 说明 |
@@ -95,6 +215,8 @@ docker compose -f deploy/compose.yml up -d --build
 | `SHOP_LOGO_FILE` | 是 | SVG Logo 文件，启动时校验真实内容；Docker 部署时填写宿主机文件路径 |
 | `ORDER_PASSWORD_PEPPER` | 否 | 订单密码哈希 pepper，生产环境务必修改 |
 | `RATE_LIMIT_TRUSTED_PROXY_CIDRS` | 否 | 允许提供 `X-Forwarded-For` 的反向代理 CIDR，多个值用逗号分隔；直连部署留空 |
+| `PGBR_SCHEDULE_HOUR_UTC` | 否 | pgBackRest 每日计划小时（UTC），默认 `3` |
+| `PGBR_CHECK_INTERVAL_SECONDS` | 否 | pgBackRest 调度检查间隔秒数，默认 `300` |
 | `WXPAY_EXPIRE_MINUTES` | 否 | 微信官方 Native 支付结束分钟数，默认 15，范围 1–120；ePay 固定为 3 分钟 |
 | `EPAY_GATEWAY` / `EPAY_PID` / `EPAY_KEY` | 否 | 三者都设置才启用易支付 |
 | `WXPAY_APP_ID` / `WXPAY_MCH_ID` | 否 | 微信支付官方直连的应用 ID 与直连商户号 |

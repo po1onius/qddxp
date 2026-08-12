@@ -1,19 +1,94 @@
+x-postgres-image: &postgres-image percona/percona-distribution-postgresql:18.4-5
+
 services:
   db:
-    image: postgres:18.4-alpine
+    # Percona 发行镜像同时包含 PostgreSQL 与 pgBackRest，数据库进程才能直接通过
+    # archive_command 持续归档 WAL，无需维护额外的定制数据库镜像。
+    image: *postgres-image
     container_name: qddxp-pgsql
     restart: unless-stopped
     environment:
       POSTGRES_DB: ${POSTGRES_DB:-qddxp}
       POSTGRES_USER: ${POSTGRES_USER:-postgres}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-postgres}
+      # PostgreSQL 18 使用版本化数据目录，恢复任务会将物理备份写回同一路径。
+      PGDATA: /data/db/18/docker
+      # pgBackRest 的 PostgreSQL 连接用户需与初始化数据库时配置的用户保持一致。
+      PGBACKREST_PG1_USER: ${POSTGRES_USER:-postgres}
+    command:
+      - postgres
+      - -c
+      - archive_mode=on
+      - -c
+      - archive_command=pgbackrest --stanza=qddxp archive-push %p
+      - -c
+      # 即使写入量较低，也至少每分钟切换一次可归档 WAL，限制潜在数据丢失窗口。
+      - archive_timeout=60s
+      - -c
+      # 将 PostgreSQL 日志交给容器标准错误，便于通过 Compose 统一查看和采集。
+      - logging_collector=off
     volumes:
-      - qddxp_db_data:/var/lib/postgresql
+      # 在线数据库、备份和恢复容器必须使用相同的数据目录布局。
+      - qddxp_db_data:/data/db
+      # 数据库负责 archive-push，备份调度器负责基础备份，两者共享同一仓库。
+      - qddxp_pgbackrest_repository:/backrestrepo
+      # 备份容器通过 Unix Socket 执行控制查询，无需保存数据库密码。
+      - qddxp_db_socket:/var/run/postgresql
+      # archive-push 与 backup 共享锁目录，避免并发修改仓库元数据。
+      - qddxp_pgbackrest_lock:/pgdata
+      - ./infra/pgbackrest/pgbackrest.conf:/etc/pgbackrest/pgbackrest.conf:ro
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
       interval: 5s
       timeout: 5s
       retries: 20
+
+  pgbackrest-backup:
+    image: *postgres-image
+    restart: unless-stopped
+    depends_on:
+      db:
+        condition: service_healthy
+    entrypoint: ["/bin/bash", "/opt/qddxp/pgbackrest-backup.sh"]
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-qddxp}
+      POSTGRES_USER: ${POSTGRES_USER:-postgres}
+      PGBACKREST_PG1_USER: ${POSTGRES_USER:-postgres}
+      # 默认每天 UTC 03:00 后执行一次：每个周日周期一次 full，其余日期一次 diff。
+      PGBR_SCHEDULE_HOUR_UTC: ${PGBR_SCHEDULE_HOUR_UTC:-3}
+      PGBR_CHECK_INTERVAL_SECONDS: ${PGBR_CHECK_INTERVAL_SECONDS:-300}
+    healthcheck:
+      test: ["CMD-SHELL", "test -f /tmp/pgbackrest-backup-ready"]
+      interval: 30s
+      timeout: 5s
+      retries: 5
+      start_period: 2m
+    volumes:
+      # 本地模式需要读取 PostgreSQL 数据文件；只读挂载防止备份任务修改在线集群。
+      - qddxp_db_data:/data/db:ro
+      - qddxp_pgbackrest_repository:/backrestrepo
+      - qddxp_db_socket:/var/run/postgresql:ro
+      - qddxp_pgbackrest_lock:/pgdata
+      - ./infra/pgbackrest/pgbackrest.conf:/etc/pgbackrest/pgbackrest.conf:ro
+      - ./infra/pgbackrest/pgbackrest-backup.sh:/opt/qddxp/pgbackrest-backup.sh:ro
+
+  pgbackrest-restore:
+    image: *postgres-image
+    # 恢复任务必须显式启用 profile，正常启动不会运行或触碰正式 PGDATA。
+    profiles: ["restore"]
+    restart: "no"
+    entrypoint: ["/bin/bash", "/opt/qddxp/pgbackrest-restore.sh"]
+    environment:
+      # 默认恢复最新备份并回放仓库内全部可用 WAL；运行命令可覆盖为 time/lsn。
+      PGBR_RESTORE_TYPE: ${PGBR_RESTORE_TYPE:-default}
+      PGBR_RESTORE_TARGET: ${PGBR_RESTORE_TARGET:-}
+      PGBR_RESTORE_SET: ${PGBR_RESTORE_SET:-latest}
+    volumes:
+      # 恢复直接写回正式数据卷；脚本要求数据库已停止且 PGDATA 是空目录。
+      - qddxp_db_data:/data/db
+      - qddxp_pgbackrest_repository:/backrestrepo:ro
+      - ./infra/pgbackrest/pgbackrest.conf:/etc/pgbackrest/pgbackrest.conf:ro
+      - ./infra/pgbackrest/pgbackrest-restore.sh:/opt/qddxp/pgbackrest-restore.sh:ro
 
   qddxp:
     container_name: qddxp
@@ -69,3 +144,6 @@ services:
 
 volumes:
   qddxp_db_data:
+  qddxp_db_socket:
+  qddxp_pgbackrest_lock:
+  qddxp_pgbackrest_repository:
