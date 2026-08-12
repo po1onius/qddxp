@@ -17,7 +17,6 @@ use crate::{
     },
 };
 
-const EXPIRE_BATCH_SIZE: i64 = 50;
 const EPAY_SCAN_INTERVAL_SECONDS: u64 = 5;
 const WXPAY_SCAN_INTERVAL_SECONDS: u64 = 60;
 
@@ -65,6 +64,8 @@ pub async fn run(state: AppState) {
 
 async fn process_epay_batch(state: &AppState) -> Result<(), AppError> {
     let mut conn = state.pool.get().await?;
+    // 不限制候选数量，确保少量永久失败的旧订单不会持续占据固定批次，阻塞后续订单。
+    // 查询完成后立即归还连接，实际过期处理仍逐笔开启短事务，避免长事务锁住整批订单。
     let attempts = payment_attempts::table
         .filter(payment_attempts::provider.eq(PaymentProvider::Epay.as_ref()))
         .filter(payment_attempts::state.eq_any([
@@ -73,7 +74,6 @@ async fn process_epay_batch(state: &AppState) -> Result<(), AppError> {
         ]))
         .filter(payment_attempts::expires_at.le(Utc::now()))
         .order(payment_attempts::expires_at.asc())
-        .limit(EXPIRE_BATCH_SIZE)
         .load::<PaymentAttempt>(&mut conn)
         .await?;
     drop(conn);
@@ -96,6 +96,8 @@ async fn process_epay_batch(state: &AppState) -> Result<(), AppError> {
 
 async fn process_wechatpay_batch(state: &AppState) -> Result<(), AppError> {
     let mut conn = state.pool.get().await?;
+    // 微信支付同样一次读取全部已过期候选，避免查询或关单永久失败的旧订单挤占固定批次。
+    // 远端查单和关单在连接归还后执行，不会在网络请求期间占用数据库连接。
     let attempts = payment_attempts::table
         .filter(payment_attempts::provider.eq(PaymentProvider::Wechatpay.as_ref()))
         .filter(payment_attempts::state.eq_any([
@@ -105,7 +107,6 @@ async fn process_wechatpay_batch(state: &AppState) -> Result<(), AppError> {
         ]))
         .filter(payment_attempts::expires_at.le(Utc::now()))
         .order(payment_attempts::expires_at.asc())
-        .limit(EXPIRE_BATCH_SIZE)
         .load::<PaymentAttempt>(&mut conn)
         .await?;
     drop(conn);

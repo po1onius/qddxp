@@ -27,6 +27,7 @@ const LAST_ORDER_ID_STORAGE = 'qddxp_last_order_id';
 const LAST_CONTACT_STORAGE = 'qddxp_last_contact';
 const PRODUCT_PAGE_SIZE = 20;
 const CONTACT_ORDER_PAGE_SIZE = 20;
+const CONTACT_MAX_LENGTH = 50;
 const ADMIN_PAGE_PATH = '/admin';
 const ORDER_QUERY_PAGE_PATH = '/orders';
 const ORDER_CREATE_PAGE_PATH = '/orders/new';
@@ -673,6 +674,10 @@ function CheckoutPage({
 
   async function submit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
+    if (Array.from(contact.trim()).length > CONTACT_MAX_LENGTH) {
+      showToast({ message: `联系方式不能超过 ${CONTACT_MAX_LENGTH} 个字符`, type: 'error' });
+      return;
+    }
     if (product.stock <= 0) {
       showToast({ message: '商品暂时无货，请返回商品列表', type: 'error' });
       return;
@@ -757,6 +762,7 @@ function CheckoutPage({
         <span className="text-sm font-medium text-slate-700">联系方式</span>
         <input
           className="mt-2 h-11 w-full rounded-md border border-slate-300 px-3 text-sm outline-none focus:border-slate-900"
+          maxLength={CONTACT_MAX_LENGTH}
           onChange={(event) => setContact(event.target.value)}
           placeholder="邮箱、QQ 或手机号"
           required
@@ -889,6 +895,10 @@ function OrderQueryPage() {
       showToast({ message: '请输入下单时填写的联系方式', type: 'error' });
       return;
     }
+    if (Array.from(trimmedContact).length > CONTACT_MAX_LENGTH) {
+      showToast({ message: `联系方式不能超过 ${CONTACT_MAX_LENGTH} 个字符`, type: 'error' });
+      return;
+    }
 
     setLoadingOrders(true);
     setOrders([]);
@@ -1005,6 +1015,7 @@ function OrderQueryPage() {
             <span className="text-sm font-medium text-slate-700">联系方式</span>
             <input
               className="mt-2 h-11 w-full rounded-md border border-slate-300 px-3 text-sm outline-none focus:border-slate-900"
+              maxLength={CONTACT_MAX_LENGTH}
               onChange={(event) => setContact(event.target.value)}
               placeholder="邮箱、QQ 或手机号"
               required

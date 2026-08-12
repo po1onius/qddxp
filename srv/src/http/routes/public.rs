@@ -27,6 +27,10 @@ use crate::{
     security::{hash_order_password, verify_order_password},
 };
 
+/// 联系方式会直接写入订单并用于精确查单，限制长度可以避免异常大输入进入日志、数据库和索引。
+/// 使用 Unicode 字符数而不是 UTF-8 字节数，确保中文等多字节字符仍按一个字符计算。
+const CONTACT_MAX_LENGTH: usize = 50;
+
 #[derive(Debug, Serialize, Queryable)]
 pub struct ProductListItem {
     pub id: Uuid,
@@ -305,6 +309,7 @@ pub async fn create_order(
     Json(request): Json<CreateOrderRequest>,
 ) -> Result<Json<CreateOrderResponse>, AppError> {
     let contact = request.contact.trim();
+    let contact_len = contact.chars().count();
     if contact.is_empty() {
         tracing::warn!(
             product_info_id = %request.product_info_id,
@@ -312,11 +317,22 @@ pub async fn create_order(
         );
         return Err(AppError::BadRequest("contact is required".to_string()));
     }
+    if contact_len > CONTACT_MAX_LENGTH {
+        tracing::warn!(
+            product_info_id = %request.product_info_id,
+            contact_len,
+            contact_max_length = CONTACT_MAX_LENGTH,
+            "create order rejected: contact is too long"
+        );
+        return Err(AppError::BadRequest(format!(
+            "contact must be at most {CONTACT_MAX_LENGTH} characters"
+        )));
+    }
 
     if request.order_password.len() < 6 {
         tracing::warn!(
             product_info_id = %request.product_info_id,
-            contact_len = contact.chars().count(),
+            contact_len,
             "create order rejected: password too short"
         );
         return Err(AppError::BadRequest(
@@ -362,7 +378,7 @@ pub async fn create_order(
         %product_info_id,
         payment_provider = payment_provider.as_ref(),
         payment_channel = payment_channel.as_ref(),
-        contact_len = contact.chars().count(),
+        contact_len,
         "creating order"
     );
 
@@ -575,9 +591,20 @@ pub async fn list_orders_by_contact(
     Json(request): Json<ListOrdersByContactRequest>,
 ) -> Result<Json<OffsetPageResponse<OrderSummaryResponse>>, AppError> {
     let contact = request.contact.trim();
+    let contact_len = contact.chars().count();
     if contact.is_empty() {
         tracing::warn!("list orders by contact rejected: missing contact");
         return Err(AppError::BadRequest("contact is required".to_string()));
+    }
+    if contact_len > CONTACT_MAX_LENGTH {
+        tracing::warn!(
+            contact_len,
+            contact_max_length = CONTACT_MAX_LENGTH,
+            "list orders by contact rejected: contact is too long"
+        );
+        return Err(AppError::BadRequest(format!(
+            "contact must be at most {CONTACT_MAX_LENGTH} characters"
+        )));
     }
 
     let pagination = OffsetPagination {
@@ -586,7 +613,7 @@ pub async fn list_orders_by_contact(
     };
     let (page, page_size, offset) = normalize_offset_page(&pagination)?;
     tracing::info!(
-        contact_len = contact.chars().count(),
+        contact_len,
         page,
         page_size,
         offset,

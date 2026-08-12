@@ -41,7 +41,8 @@ CREATE TABLE orders (
     paid_at TIMESTAMPTZ,
     status TEXT NOT NULL DEFAULT 'pending'
         CHECK (status IN ('pending', 'paid', 'expired', 'cancelled')),
-    contact TEXT NOT NULL,
+    -- PostgreSQL 的 char_length 按字符而非 UTF-8 字节计数，与应用层校验语义一致。
+    contact TEXT NOT NULL CHECK (char_length(contact) <= 50),
     order_password_hash TEXT NOT NULL
 );
 
