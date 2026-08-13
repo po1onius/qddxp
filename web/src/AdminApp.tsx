@@ -511,8 +511,9 @@ function AdminDashboard({
               onFiltersChange={changeInventoryFilters}
               onInventoryCreated={(result) => {
                 const stockedText = result.stocked > 0 ? `新增 ${result.stocked} 条可售库存` : '';
+                const duplicateText = result.duplicates > 0 ? `，忽略 ${result.duplicates} 条重复卡密` : '';
                 showToast({
-                  message: stockedText || '没有新增库存',
+                  message: `${stockedText || '没有新增库存'}${duplicateText}`,
                   type: 'success',
                 });
                 void refreshProducts();
@@ -1490,8 +1491,10 @@ function StockCreateModal({
       });
       console.info('[库存补货] 批量库存提交成功', {
         productInfoId,
+        submitted: createdProducts.submitted,
         createdCount: createdProducts.items.length,
         stocked: createdProducts.stocked,
+        duplicates: createdProducts.duplicates,
       });
       onCreated(createdProducts);
     } catch (err) {

@@ -83,6 +83,13 @@ pub enum PaymentAction {
     },
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PublishPaymentAttemptOutcome {
+    Ready,
+    AlreadyPaid,
+    Unavailable,
+}
+
 #[derive(Debug, Serialize)]
 pub struct PaymentMethodResponse {
     pub provider: String,
@@ -484,35 +491,38 @@ pub async fn create_order(
         }
     };
 
+    let mut response_status = order.status.clone();
     let (payment_action, payment_error) = match payment_provider {
         PaymentProvider::Epay => {
-            let payment_url = epay::build_payment_url(
-                state.config.as_ref(),
-                order.id,
-                &payment_attempt.merchant_trade_no,
-                &order.product_name_snapshot,
-                order.amount_cents,
-                payment_channel.as_ref(),
-            )
-            .expect("ePay configuration was checked before creating the order");
-            let mut conn = state.pool.get().await?;
-            diesel::update(
-                payment_attempts::table.filter(payment_attempts::id.eq(payment_attempt.id)),
-            )
-            .set((
-                payment_attempts::state.eq(PaymentAttemptState::Ready.as_ref()),
-                payment_attempts::updated_at.eq(Utc::now()),
-            ))
-            .execute(&mut conn)
-            .await?;
-            tracing::info!(
-                order_id = %order.id,
-                payment_attempt_id = %payment_attempt.id,
-                provider = payment_provider.as_ref(),
-                channel = payment_channel.as_ref(),
-                "ePay payment attempt is ready for redirect"
-            );
-            (Some(PaymentAction::Redirect { url: payment_url }), None)
+            match publish_payment_attempt_ready(&state, &payment_attempt, None).await? {
+                PublishPaymentAttemptOutcome::Ready => {
+                    let payment_url = epay::build_payment_url(
+                        state.config.as_ref(),
+                        order.id,
+                        &payment_attempt.merchant_trade_no,
+                        &order.product_name_snapshot,
+                        order.amount_cents,
+                        payment_channel.as_ref(),
+                    )
+                    .expect("ePay configuration was checked before creating the order");
+                    tracing::info!(
+                        order_id = %order.id,
+                        payment_attempt_id = %payment_attempt.id,
+                        provider = payment_provider.as_ref(),
+                        channel = payment_channel.as_ref(),
+                        "ePay payment attempt is ready for redirect"
+                    );
+                    (Some(PaymentAction::Redirect { url: payment_url }), None)
+                }
+                PublishPaymentAttemptOutcome::AlreadyPaid => {
+                    response_status = OrderStatus::Paid.as_ref().to_string();
+                    (None, None)
+                }
+                PublishPaymentAttemptOutcome::Unavailable => (
+                    None,
+                    Some("订单已过期，支付入口未生成，请重新下单".to_string()),
+                ),
+            }
         }
         PaymentProvider::Wechatpay => {
             let client = state
@@ -530,24 +540,43 @@ pub async fn create_order(
                 .await
             {
                 Ok(prepay) => {
-                    let mut conn = state.pool.get().await?;
-                    diesel::update(
-                        payment_attempts::table.filter(payment_attempts::id.eq(payment_attempt.id)),
+                    match publish_payment_attempt_ready(
+                        &state,
+                        &payment_attempt,
+                        Some(&prepay.code_url),
                     )
-                    .set((
-                        payment_attempts::state.eq(PaymentAttemptState::Ready.as_ref()),
-                        payment_attempts::code_url.eq(Some(prepay.code_url.as_str())),
-                        payment_attempts::updated_at.eq(Utc::now()),
-                    ))
-                    .execute(&mut conn)
-                    .await?;
-                    (
-                        Some(PaymentAction::QrCode {
-                            content: prepay.code_url,
-                            expires_at: payment_attempt.expires_at,
-                        }),
-                        None,
-                    )
+                    .await?
+                    {
+                        PublishPaymentAttemptOutcome::Ready => (
+                            Some(PaymentAction::QrCode {
+                                content: prepay.code_url,
+                                expires_at: payment_attempt.expires_at,
+                            }),
+                            None,
+                        ),
+                        PublishPaymentAttemptOutcome::AlreadyPaid => {
+                            response_status = OrderStatus::Paid.as_ref().to_string();
+                            (None, None)
+                        }
+                        PublishPaymentAttemptOutcome::Unavailable => {
+                            // 微信远端下单已经成功，但本地订单可能在网络请求期间到期并释放
+                            // 库存。此时立即关单，禁止把仍可扫码的二维码暴露给用户。
+                            if let Err(error) =
+                                client.close_order(&payment_attempt.merchant_trade_no).await
+                            {
+                                tracing::error!(
+                                    order_id = %order.id,
+                                    payment_attempt_id = %payment_attempt.id,
+                                    error = ?error,
+                                    "failed to close unpublished WeChat Pay order"
+                                );
+                            }
+                            (
+                                None,
+                                Some("订单已过期，微信支付入口已关闭，请重新下单".to_string()),
+                            )
+                        }
+                    }
                 }
                 Err(error) => {
                     tracing::error!(
@@ -556,16 +585,7 @@ pub async fn create_order(
                         error = ?error,
                         "official WeChat Pay Native prepay failed"
                     );
-                    let mut conn = state.pool.get().await?;
-                    diesel::update(
-                        payment_attempts::table.filter(payment_attempts::id.eq(payment_attempt.id)),
-                    )
-                    .set((
-                        payment_attempts::state.eq(PaymentAttemptState::Failed.as_ref()),
-                        payment_attempts::updated_at.eq(Utc::now()),
-                    ))
-                    .execute(&mut conn)
-                    .await?;
+                    mark_payment_attempt_failed_if_created(&state, payment_attempt.id).await?;
                     (
                         None,
                         Some(
@@ -586,10 +606,112 @@ pub async fn create_order(
 
     Ok(Json(CreateOrderResponse {
         id: order.id,
-        status: order.status,
+        status: response_status,
         payment_action,
         payment_error,
     }))
+}
+
+/// 支付方准备工作完成后，按超时 worker 相同的“支付尝试 → 订单”顺序加锁并发布入口。
+/// 只有尚未到期的 created 尝试和 pending 订单能够进入 ready，杜绝超时释放后被请求线程
+/// 重新写回 ready 的状态复活竞争。
+async fn publish_payment_attempt_ready(
+    state: &AppState,
+    attempt: &PaymentAttempt,
+    code_url: Option<&str>,
+) -> Result<PublishPaymentAttemptOutcome, AppError> {
+    let mut conn = state.pool.get().await?;
+    conn.transaction::<_, AppError, _>(async move |conn| {
+        let locked_attempt = payment_attempts::table
+            .filter(payment_attempts::id.eq(attempt.id))
+            .for_update()
+            .first::<PaymentAttempt>(conn)
+            .await?;
+        let order = orders::table
+            .filter(orders::id.eq(locked_attempt.order_id))
+            .for_update()
+            .first::<Order>(conn)
+            .await?;
+
+        if locked_attempt.state == PaymentAttemptState::Succeeded.as_ref()
+            || order.status == OrderStatus::Paid.as_ref()
+        {
+            tracing::info!(
+                order_id = %order.id,
+                payment_attempt_id = %locked_attempt.id,
+                "payment completed before prepared entry was published"
+            );
+            return Ok(PublishPaymentAttemptOutcome::AlreadyPaid);
+        }
+
+        let now = Utc::now();
+        if locked_attempt.state != PaymentAttemptState::Created.as_ref()
+            || order.status != OrderStatus::Pending.as_ref()
+            || locked_attempt.expires_at <= now
+        {
+            tracing::warn!(
+                order_id = %order.id,
+                payment_attempt_id = %locked_attempt.id,
+                attempt_state = %locked_attempt.state,
+                order_status = %order.status,
+                expires_at = %locked_attempt.expires_at,
+                "prepared payment entry was not published because local reservation is unavailable"
+            );
+            return Ok(PublishPaymentAttemptOutcome::Unavailable);
+        }
+
+        let updated = diesel::update(
+            payment_attempts::table
+                .filter(payment_attempts::id.eq(locked_attempt.id))
+                .filter(payment_attempts::state.eq(PaymentAttemptState::Created.as_ref())),
+        )
+        .set((
+            payment_attempts::state.eq(PaymentAttemptState::Ready.as_ref()),
+            payment_attempts::code_url.eq(code_url),
+            payment_attempts::updated_at.eq(now),
+        ))
+        .execute(conn)
+        .await?;
+        if updated != 1 {
+            tracing::error!(
+                order_id = %order.id,
+                payment_attempt_id = %locked_attempt.id,
+                updated,
+                "payment entry publication lost its expected state"
+            );
+            return Err(AppError::Conflict(
+                "payment attempt state changed while publishing".to_string(),
+            ));
+        }
+        Ok(PublishPaymentAttemptOutcome::Ready)
+    })
+    .await
+}
+
+/// 远端下单失败只能把仍处于 created 的尝试标成 failed；若超时任务已经关闭该尝试，
+/// 这里必须保持 closed，不能把终态重新改成 worker 会继续处理的 failed。
+async fn mark_payment_attempt_failed_if_created(
+    state: &AppState,
+    attempt_id: Uuid,
+) -> Result<(), AppError> {
+    let mut conn = state.pool.get().await?;
+    let updated = diesel::update(
+        payment_attempts::table
+            .filter(payment_attempts::id.eq(attempt_id))
+            .filter(payment_attempts::state.eq(PaymentAttemptState::Created.as_ref())),
+    )
+    .set((
+        payment_attempts::state.eq(PaymentAttemptState::Failed.as_ref()),
+        payment_attempts::updated_at.eq(Utc::now()),
+    ))
+    .execute(&mut conn)
+    .await?;
+    tracing::info!(
+        %attempt_id,
+        updated,
+        "recorded WeChat Pay preparation failure when attempt remained created"
+    );
+    Ok(())
 }
 
 pub async fn list_orders_by_contact(

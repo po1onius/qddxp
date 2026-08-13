@@ -19,6 +19,8 @@ use crate::{
 
 const EPAY_SCAN_INTERVAL_SECONDS: u64 = 5;
 const WXPAY_SCAN_INTERVAL_SECONDS: u64 = 60;
+const WXPAY_BATCH_SIZE: i64 = 20;
+const WXPAY_MAX_CONCURRENCY: usize = 4;
 
 /// 分别执行 ePay 本地超时与微信官方远端关单策略。
 ///
@@ -39,25 +41,38 @@ pub async fn run(state: AppState) {
         "payment expiration worker started"
     );
 
-    let mut epay_interval =
-        tokio::time::interval(std::time::Duration::from_secs(EPAY_SCAN_INTERVAL_SECONDS));
-    let mut wechatpay_interval =
-        tokio::time::interval(std::time::Duration::from_secs(WXPAY_SCAN_INTERVAL_SECONDS));
-    epay_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-    wechatpay_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    // 两个渠道必须使用独立调度循环。微信查单和关单包含外部网络请求，即使大量请求
+    // 超时，也不能阻塞 ePay 每五秒扫描一次的三分钟库存释放期限。
+    match (epay_enabled, wechatpay_enabled) {
+        (true, true) => {
+            tokio::join!(run_epay_worker(state.clone()), run_wechatpay_worker(state));
+        }
+        (true, false) => run_epay_worker(state).await,
+        (false, true) => run_wechatpay_worker(state).await,
+        (false, false) => unreachable!("disabled workers returned before scheduler startup"),
+    }
+}
 
+async fn run_epay_worker(state: AppState) {
+    let mut interval =
+        tokio::time::interval(std::time::Duration::from_secs(EPAY_SCAN_INTERVAL_SECONDS));
+    interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     loop {
-        tokio::select! {
-            _ = epay_interval.tick(), if epay_enabled => {
-                if let Err(error) = process_epay_batch(&state).await {
-                    tracing::error!(error = ?error, "ePay expiration batch failed");
-                }
-            }
-            _ = wechatpay_interval.tick(), if wechatpay_enabled => {
-                if let Err(error) = process_wechatpay_batch(&state).await {
-                    tracing::error!(error = ?error, "WeChat Pay expiration batch failed");
-                }
-            }
+        interval.tick().await;
+        if let Err(error) = process_epay_batch(&state).await {
+            tracing::error!(error = ?error, "ePay expiration batch failed");
+        }
+    }
+}
+
+async fn run_wechatpay_worker(state: AppState) {
+    let mut interval =
+        tokio::time::interval(std::time::Duration::from_secs(WXPAY_SCAN_INTERVAL_SECONDS));
+    interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    loop {
+        interval.tick().await;
+        if let Err(error) = process_wechatpay_batch(&state).await {
+            tracing::error!(error = ?error, "WeChat Pay expiration batch failed");
         }
     }
 }
@@ -96,8 +111,8 @@ async fn process_epay_batch(state: &AppState) -> Result<(), AppError> {
 
 async fn process_wechatpay_batch(state: &AppState) -> Result<(), AppError> {
     let mut conn = state.pool.get().await?;
-    // 微信支付同样一次读取全部已过期候选，避免查询或关单永久失败的旧订单挤占固定批次。
-    // 远端查单和关单在连接归还后执行，不会在网络请求期间占用数据库连接。
+    // 每轮只取固定数量，防止积压时一次创建无上限的网络请求。失败候选会更新 updated_at
+    // 并排到队尾，因此少量永久失败订单不会持续占住固定批次。
     let attempts = payment_attempts::table
         .filter(payment_attempts::provider.eq(PaymentProvider::Wechatpay.as_ref()))
         .filter(payment_attempts::state.eq_any([
@@ -106,7 +121,11 @@ async fn process_wechatpay_batch(state: &AppState) -> Result<(), AppError> {
             PaymentAttemptState::Failed.as_ref(),
         ]))
         .filter(payment_attempts::expires_at.le(Utc::now()))
-        .order(payment_attempts::expires_at.asc())
+        .order((
+            payment_attempts::updated_at.asc(),
+            payment_attempts::expires_at.asc(),
+        ))
+        .limit(WXPAY_BATCH_SIZE)
         .load::<PaymentAttempt>(&mut conn)
         .await?;
     drop(conn);
@@ -115,12 +134,31 @@ async fn process_wechatpay_batch(state: &AppState) -> Result<(), AppError> {
     }
     tracing::info!(
         count = attempts.len(),
+        max_concurrency = WXPAY_MAX_CONCURRENCY,
         "processing expired WeChat Pay attempts"
     );
+
+    // 受控并发可缩短一批慢请求的总耗时，同时严格限制对微信和本机资源的瞬时压力。
+    let mut tasks = tokio::task::JoinSet::new();
     for attempt in attempts {
-        process_wechatpay_attempt(state, attempt).await;
+        if tasks.len() >= WXPAY_MAX_CONCURRENCY {
+            log_wechatpay_task_result(tasks.join_next().await);
+        }
+        let state = state.clone();
+        tasks.spawn(async move {
+            process_wechatpay_attempt(&state, attempt).await;
+        });
+    }
+    while let Some(result) = tasks.join_next().await {
+        log_wechatpay_task_result(Some(result));
     }
     Ok(())
+}
+
+fn log_wechatpay_task_result(result: Option<Result<(), tokio::task::JoinError>>) {
+    if let Some(Err(error)) = result {
+        tracing::error!(error = ?error, "WeChat Pay expiration task terminated unexpectedly");
+    }
 }
 
 async fn process_wechatpay_attempt(state: &AppState, attempt: PaymentAttempt) {
@@ -136,6 +174,7 @@ async fn process_wechatpay_attempt(state: &AppState, attempt: PaymentAttempt) {
                     error = ?error,
                     "expired WeChat Pay attempt was paid but could not be applied"
                 );
+                defer_wechatpay_retry(state, &attempt).await;
             }
         }
         Ok(transaction) if transaction.trade_state == "CLOSED" => {
@@ -143,6 +182,7 @@ async fn process_wechatpay_attempt(state: &AppState, attempt: PaymentAttempt) {
                 expire_reserved_attempt(state, &attempt, "wechatpay_already_closed").await
             {
                 tracing::error!(payment_attempt_id = %attempt.id, error = ?error, "failed to expire closed WeChat Pay attempt");
+                defer_wechatpay_retry(state, &attempt).await;
             }
         }
         Ok(transaction) => match client.close_order(&attempt.merchant_trade_no).await {
@@ -151,27 +191,63 @@ async fn process_wechatpay_attempt(state: &AppState, attempt: PaymentAttempt) {
                     expire_reserved_attempt(state, &attempt, "wechatpay_closed").await
                 {
                     tracing::error!(payment_attempt_id = %attempt.id, error = ?error, "failed to expire WeChat Pay attempt after close");
+                    defer_wechatpay_retry(state, &attempt).await;
                 }
             }
-            Err(error) => tracing::warn!(
-                payment_attempt_id = %attempt.id,
-                trade_state = %transaction.trade_state,
-                error = ?error,
-                "WeChat Pay close failed; attempt retained for retry"
-            ),
+            Err(error) => {
+                tracing::warn!(
+                    payment_attempt_id = %attempt.id,
+                    trade_state = %transaction.trade_state,
+                    error = ?error,
+                    "WeChat Pay close failed; attempt retained for retry"
+                );
+                defer_wechatpay_retry(state, &attempt).await;
+            }
         },
         Err(WechatPayError::Api { code, .. }) if code == "ORDER_NOT_EXIST" => {
             if let Err(error) =
                 expire_reserved_attempt(state, &attempt, "wechatpay_order_not_exist").await
             {
                 tracing::error!(payment_attempt_id = %attempt.id, error = ?error, "failed to expire missing WeChat Pay attempt");
+                defer_wechatpay_retry(state, &attempt).await;
             }
         }
-        Err(error) => tracing::warn!(
+        Err(error) => {
+            tracing::warn!(
+                payment_attempt_id = %attempt.id,
+                error = ?error,
+                "WeChat Pay query failed; expired attempt retained for retry"
+            );
+            defer_wechatpay_retry(state, &attempt).await;
+        }
+    }
+}
+
+/// 远端临时失败后把候选移到本轮队尾，使固定批次能够公平覆盖后续过期订单。
+async fn defer_wechatpay_retry(state: &AppState, attempt: &PaymentAttempt) {
+    let result = async {
+        let mut conn = state.pool.get().await?;
+        diesel::update(
+            payment_attempts::table
+                .filter(payment_attempts::id.eq(attempt.id))
+                .filter(payment_attempts::state.eq_any([
+                    PaymentAttemptState::Created.as_ref(),
+                    PaymentAttemptState::Ready.as_ref(),
+                    PaymentAttemptState::Failed.as_ref(),
+                ])),
+        )
+        .set(payment_attempts::updated_at.eq(Utc::now()))
+        .execute(&mut conn)
+        .await?;
+        Ok::<(), AppError>(())
+    }
+    .await;
+    if let Err(error) = result {
+        tracing::error!(
             payment_attempt_id = %attempt.id,
             error = ?error,
-            "WeChat Pay query failed; expired attempt retained for retry"
-        ),
+            "failed to defer WeChat Pay expiration retry"
+        );
     }
 }
 

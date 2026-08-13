@@ -54,7 +54,9 @@ export type CreateAdminProductInput = {
 
 export type CreateAdminProductResult = {
   items: AdminProduct[];
+  submitted: number;
   stocked: number;
+  duplicates: number;
 };
 
 export type UpdateAdminProductStatusInput = {

@@ -59,7 +59,9 @@ pub struct CreateProductRequest {
 #[derive(Debug, Serialize)]
 pub struct CreateProductResponse {
     pub items: Vec<Product>,
+    pub submitted: usize,
     pub stocked: usize,
+    pub duplicates: usize,
 }
 
 #[derive(Debug, Deserialize)]
@@ -265,11 +267,19 @@ pub async fn create_product(
 ) -> Result<(StatusCode, Json<CreateProductResponse>), AppError> {
     require_admin_for(&session, "create_product").await?;
 
-    let contents = product_contents(&request)?;
+    let mut contents = product_contents(&request)?;
+    let submitted = contents.len();
+    // 先在进程内保持原顺序去重，减少无意义的 INSERT；数据库摘要唯一索引仍是最终并发
+    // 防线，可以处理不同请求或不同应用实例同时导入相同卡密的竞争。
+    let mut unique_contents = HashSet::with_capacity(contents.len());
+    contents.retain(|content| unique_contents.insert(content.clone()));
+    let request_duplicates = submitted.saturating_sub(contents.len());
     tracing::info!(
         product_info_id = %request.product_info_id,
         raw_items = request.contents.len(),
-        normalized_items = contents.len(),
+        normalized_items = submitted,
+        unique_items = contents.len(),
+        request_duplicates,
         "admin creating inventory products"
     );
 
@@ -296,16 +306,22 @@ pub async fn create_product(
 
             diesel::insert_into(products::table)
                 .values(&new_products)
+                // 不指定冲突目标，使 PostgreSQL 的卡密摘要唯一索引负责最终裁决。这样两个
+                // 管理请求并发导入相同内容时，最多只有一个请求能够创建该条库存。
+                .on_conflict_do_nothing()
                 .get_results::<Product>(conn)
                 .await
                 .map_err(Into::into)
         })
         .await?;
     let stocked = products.len();
+    let duplicates = submitted.saturating_sub(stocked);
     tracing::info!(
         product_info_id = %request.product_info_id,
+        submitted,
         created = products.len(),
         stocked,
+        duplicates,
         "admin created inventory products"
     );
 
@@ -313,7 +329,9 @@ pub async fn create_product(
         StatusCode::CREATED,
         Json(CreateProductResponse {
             items: products,
+            submitted,
             stocked,
+            duplicates,
         }),
     ))
 }

@@ -25,6 +25,11 @@ CREATE TABLE products (
 
 CREATE INDEX products_info_status_idx ON products(product_info_id, status);
 CREATE INDEX products_created_at_id_idx ON products(created_at DESC, id DESC);
+-- 卡密内容可能包含较长的多行文本，直接为 content 建 B-tree 唯一索引可能超过 PostgreSQL
+-- 单条索引记录大小限制。使用 pgcrypto 的 SHA-256 摘要建立同商品内唯一索引，既能阻止
+-- 同一批次、重复上传和并发上传造成的重复库存，也不会把卡密明文复制进额外索引。
+CREATE UNIQUE INDEX products_info_content_sha256_unique_idx
+ON products(product_info_id, digest(content, 'sha256'));
 
 -- 订单保存下单时的商品名称、金额和币种快照，后续修改商品定义不会影响已创建订单。
 -- 待支付和已支付订单必须由应用层保证持有有效的 product_id；超时释放库存后清空该字段。
@@ -87,6 +92,10 @@ CREATE INDEX payment_attempts_order_created_at_idx
 ON payment_attempts(order_id, created_at DESC);
 CREATE INDEX payment_attempts_provider_state_expires_idx
 ON payment_attempts(provider, state, expires_at);
+-- 微信支付超时任务按 updated_at 轮转失败候选，避免少量持续失败的旧订单占满批次后
+-- 永久阻塞后续订单；provider/state 前缀同时覆盖候选状态筛选。
+CREATE INDEX payment_attempts_provider_state_updated_idx
+ON payment_attempts(provider, state, updated_at, expires_at);
 
 -- 支付事件用于回调、主动查单等入口的幂等和审计；同一提供方事件只能入账一次。
 CREATE TABLE payment_events (

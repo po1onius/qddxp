@@ -646,17 +646,46 @@ function CheckoutPage({
         }
       });
 
+    const expiresAt = new Date(action.expires_at).getTime();
+    let countdown: number | undefined;
+    let poll: number | undefined;
+
+    // 服务端返回的支付截止时间是自动轮询的硬边界。倒计时归零后同时清理两个定时器，
+    // 页面即使长期停留也不会继续产生已经没有意义的订单查询请求。
+    const stopPolling = () => {
+      stopped = true;
+      if (countdown !== undefined) {
+        window.clearInterval(countdown);
+      }
+      if (poll !== undefined) {
+        window.clearInterval(poll);
+      }
+    };
     const updateRemaining = () => {
-      const seconds = Math.max(0, Math.ceil((new Date(action.expires_at).getTime() - Date.now()) / 1000));
+      const seconds = Math.max(0, Math.ceil((expiresAt - Date.now()) / 1000));
       setRemainingSeconds(seconds);
+      if (seconds === 0) {
+        stopPolling();
+      }
     };
     updateRemaining();
-    const countdown = window.setInterval(updateRemaining, 1000);
-    const poll = window.setInterval(async () => {
+    if (stopped) {
+      return stopPolling;
+    }
+
+    countdown = window.setInterval(updateRemaining, 1000);
+    poll = window.setInterval(async () => {
+      // 定时器触发点可能刚好跨过截止时间，因此请求发出前再检查一次，避免等待下一次
+      // 一秒倒计时才停止。
+      if (Date.now() >= expiresAt) {
+        setRemainingSeconds(0);
+        stopPolling();
+        return;
+      }
       try {
         const detail = await queryOrder({ id: qrOrder.id, order_password: orderPassword });
         if (!stopped && detail.status === 'paid') {
-          stopped = true;
+          stopPolling();
           showToast({ message: '微信支付已确认，正在进入订单详情', type: 'success' });
           onCreated(qrOrder);
         }
@@ -666,9 +695,7 @@ function CheckoutPage({
     }, 2500);
 
     return () => {
-      stopped = true;
-      window.clearInterval(countdown);
-      window.clearInterval(poll);
+      stopPolling();
     };
   }, [onCreated, orderPassword, qrOrder, showToast]);
 
