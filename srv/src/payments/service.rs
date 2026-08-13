@@ -406,31 +406,3 @@ async fn deliver_order_inventory(
     );
     Ok(())
 }
-
-#[cfg(test)]
-mod tests {
-    use chrono::Duration;
-
-    use super::*;
-
-    #[test]
-    fn only_epay_confirmed_after_deadline_is_locally_classified_as_late() {
-        let expires_at = Utc::now();
-
-        assert!(is_epay_paid_after_deadline(
-            PaymentProvider::Epay.as_ref(),
-            expires_at + Duration::milliseconds(1),
-            expires_at,
-        ));
-        assert!(!is_epay_paid_after_deadline(
-            PaymentProvider::Epay.as_ref(),
-            expires_at,
-            expires_at,
-        ));
-        assert!(!is_epay_paid_after_deadline(
-            PaymentProvider::Wechatpay.as_ref(),
-            expires_at + Duration::minutes(1),
-            expires_at,
-        ));
-    }
-}

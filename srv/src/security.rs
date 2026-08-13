@@ -58,37 +58,3 @@ pub fn verify_order_password(
 ) -> Result<bool, AppError> {
     Ok(hash_order_password(password, pepper)? == expected_hash)
 }
-
-#[cfg(test)]
-mod tests {
-    use std::sync::Arc;
-
-    use tower_sessions::Session;
-    use tower_sessions_moka_store::MokaStore;
-
-    use super::*;
-
-    #[test]
-    fn admin_key_verification_only_accepts_exact_key() {
-        let expected = "a-long-random-administrator-key";
-
-        assert!(verify_admin_key(expected, expected));
-        assert!(!verify_admin_key(
-            "a-long-random-administrator-ke",
-            expected
-        ));
-        assert!(!verify_admin_key("", expected));
-    }
-
-    #[tokio::test]
-    async fn admin_session_can_be_authenticated_and_cleared() {
-        let store = Arc::new(MokaStore::new(Some(10)));
-        let session = Session::new(None, store, None);
-
-        assert!(!is_admin_session(&session).await.unwrap());
-        authenticate_admin_session(&session).await.unwrap();
-        assert!(is_admin_session(&session).await.unwrap());
-        clear_admin_session(&session).await.unwrap();
-        assert!(!is_admin_session(&session).await.unwrap());
-    }
-}

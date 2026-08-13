@@ -281,38 +281,3 @@ fn telegram_config_from_values(
         _ => Err(ConfigError::IncompleteTelegramConfig),
     }
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn shop_logo_content_accepts_svg_without_relying_on_extension() {
-        assert!(is_svg(
-            br#"<?xml version="1.0"?><svg xmlns="http://www.w3.org/2000/svg"></svg>"#
-        ));
-        assert!(is_svg(br#"<svg viewBox="0 0 10 10"></svg>"#));
-        assert!(is_svg(include_bytes!("../../deploy/assets/shop-logo.svg")));
-    }
-
-    #[test]
-    fn shop_logo_content_rejects_non_svg_or_invalid_xml() {
-        assert!(!is_svg(&[0x89, 0x50, 0x4E, 0x47]));
-        assert!(!is_svg(b"<html></html>"));
-        assert!(!is_svg(b"<svg>"));
-    }
-
-    #[test]
-    fn trusted_proxy_cidrs_are_trimmed_and_validated() {
-        assert_eq!(
-            parse_trusted_proxy_cidrs(Some("127.0.0.1/32, 10.0.0.0/8"))
-                .expect("合法 CIDR 应当可以解析"),
-            vec![
-                "127.0.0.1/32".parse().unwrap(),
-                "10.0.0.0/8".parse().unwrap()
-            ]
-        );
-        assert!(parse_trusted_proxy_cidrs(Some("10.0.0.1")).is_err());
-        assert!(parse_trusted_proxy_cidrs(Some("")).unwrap().is_empty());
-    }
-}

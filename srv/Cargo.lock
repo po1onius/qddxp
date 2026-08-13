@@ -2030,7 +2030,6 @@ dependencies = [
  "thiserror",
  "time",
  "tokio",
- "tower",
  "tower-http",
  "tower-sessions",
  "tower-sessions-moka-store",

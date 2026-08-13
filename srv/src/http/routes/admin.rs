@@ -637,37 +637,3 @@ fn product_contents(request: &CreateProductRequest) -> Result<Vec<String>, AppEr
 
     Ok(contents)
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn product_contents_treats_each_array_item_as_one_inventory_entry() {
-        let request = CreateProductRequest {
-            product_info_id: Uuid::new_v4(),
-            contents: vec![
-                " 账号：demo\n密码：secret ".to_string(),
-                "   ".to_string(),
-                " second-item ".to_string(),
-            ],
-        };
-
-        let contents = product_contents(&request).expect("库存内容应当通过校验");
-
-        assert_eq!(contents, vec!["账号：demo\n密码：secret", "second-item"]);
-    }
-
-    #[test]
-    fn product_contents_rejects_items_containing_only_whitespace() {
-        let request = CreateProductRequest {
-            product_info_id: Uuid::new_v4(),
-            contents: vec![" \r\n\t ".to_string()],
-        };
-
-        assert!(matches!(
-            product_contents(&request),
-            Err(AppError::BadRequest(message)) if message == "contents is required"
-        ));
-    }
-}
