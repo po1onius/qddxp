@@ -1,5 +1,5 @@
 use std::{
-    env,
+    env, fmt,
     net::SocketAddr,
     path::{Path, PathBuf},
 };
@@ -25,6 +25,7 @@ pub struct AppConfig {
     pub wechatpay_expire_minutes: i64,
     pub epay: Option<EpayConfig>,
     pub wechatpay: Option<WechatPayConfig>,
+    pub telegram: Option<TelegramConfig>,
 }
 
 #[derive(Debug, Clone)]
@@ -44,6 +45,23 @@ pub struct WechatPayConfig {
     pub public_key_id: String,
     pub public_key_file: PathBuf,
     pub notify_url: String,
+}
+
+#[derive(Clone)]
+pub struct TelegramConfig {
+    pub bot_token: String,
+    pub chat_id: String,
+}
+
+// Bot Token 属于生产密钥，即使未来有人直接调试输出 AppConfig，也必须保持脱敏。
+impl fmt::Debug for TelegramConfig {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("TelegramConfig")
+            .field("bot_token", &"[REDACTED]")
+            .field("chat_id", &self.chat_id)
+            .finish()
+    }
 }
 
 #[derive(Debug, Error)]
@@ -69,6 +87,10 @@ pub enum ConfigError {
     IncompletePaymentConfig(&'static str),
     #[error("PUBLIC_BASE_URL must use https when official WeChat Pay is enabled")]
     WechatPayRequiresHttps,
+    #[error(
+        "incomplete Telegram configuration: TELEGRAM_BOT_TOKEN and TELEGRAM_NOTIFY_CHAT_ID must be configured together"
+    )]
+    IncompleteTelegramConfig,
 }
 
 impl AppConfig {
@@ -171,6 +193,11 @@ impl AppConfig {
             })
         };
 
+        let telegram = telegram_config_from_values(
+            env::var("TELEGRAM_BOT_TOKEN").ok(),
+            env::var("TELEGRAM_NOTIFY_CHAT_ID").ok(),
+        )?;
+
         Ok(Self {
             listen_addr,
             database_url,
@@ -185,6 +212,7 @@ impl AppConfig {
             wechatpay_expire_minutes,
             epay,
             wechatpay,
+            telegram,
         })
     }
 }
@@ -231,10 +259,27 @@ fn required(name: &'static str) -> Result<String, ConfigError> {
 }
 
 fn optional_nonempty(name: &'static str) -> Option<String> {
-    env::var(name)
-        .ok()
+    optional_nonempty_value(env::var(name).ok())
+}
+
+fn optional_nonempty_value(value: Option<String>) -> Option<String> {
+    value
         .map(|value| value.trim().to_string())
         .filter(|value| !value.is_empty())
+}
+
+fn telegram_config_from_values(
+    bot_token: Option<String>,
+    chat_id: Option<String>,
+) -> Result<Option<TelegramConfig>, ConfigError> {
+    match (
+        optional_nonempty_value(bot_token),
+        optional_nonempty_value(chat_id),
+    ) {
+        (None, None) => Ok(None),
+        (Some(bot_token), Some(chat_id)) => Ok(Some(TelegramConfig { bot_token, chat_id })),
+        _ => Err(ConfigError::IncompleteTelegramConfig),
+    }
 }
 
 #[cfg(test)]

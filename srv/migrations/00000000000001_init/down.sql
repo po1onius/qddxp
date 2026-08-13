@@ -1,4 +1,5 @@
 -- 按创建顺序逆序删除全部业务表。表之间没有外键，顺序主要用于保持迁移结构清晰。
+DROP TABLE IF EXISTS notification_outbox;
 DROP TABLE IF EXISTS api_call_logs;
 DROP TABLE IF EXISTS payment_events;
 DROP TABLE IF EXISTS payment_attempts;

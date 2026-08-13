@@ -235,6 +235,7 @@ async fn apply_success(
             currency: &transaction.amount.currency,
             paid_at,
             request_body: &body,
+            notifications_enabled: state.telegram.is_some(),
         },
     )
     .await?;

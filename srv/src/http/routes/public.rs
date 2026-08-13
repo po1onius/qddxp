@@ -23,6 +23,7 @@ use crate::{
     },
     error::AppError,
     http::pagination::{OffsetPageResponse, OffsetPagination, normalize_offset_page},
+    notifications,
     payments::EPAY_RESERVATION_MINUTES,
     security::{hash_order_password, verify_order_password},
 };
@@ -374,6 +375,7 @@ pub async fn create_order(
         PaymentProvider::Epay => EPAY_RESERVATION_MINUTES,
         PaymentProvider::Wechatpay => state.config.wechatpay_expire_minutes,
     };
+    let notifications_enabled = state.telegram.is_some();
     tracing::info!(
         %product_info_id,
         payment_provider = payment_provider.as_ref(),
@@ -455,6 +457,10 @@ pub async fn create_order(
                 })
                 .get_result(conn)
                 .await?;
+            if notifications_enabled {
+                // Outbox 与订单、库存预占在同一事务提交；事务回滚时不会留下幽灵通知。
+                notifications::enqueue_order_created(conn, &order, &payment_attempt).await?;
+            }
             tracing::info!(
                 order_id = %order.id,
                 %product_info_id,

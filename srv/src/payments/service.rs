@@ -11,6 +11,7 @@ use crate::{
     },
     domain::{OrderStatus, PaymentAttemptState, PaymentProvider, ProductStatus},
     error::AppError,
+    notifications,
 };
 
 /// 已经由具体支付协议完成验签、解密和商户身份校验后的统一收款事实。
@@ -26,6 +27,8 @@ pub struct PaymentConfirmation<'a> {
     pub currency: &'a str,
     pub paid_at: DateTime<Utc>,
     pub request_body: &'a str,
+    /// 未配置 Telegram 时不积压 Outbox，防止将来启用功能后补发历史交易消息。
+    pub notifications_enabled: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -179,6 +182,17 @@ pub async fn confirm_payment(
                 .await?;
             mark_attempt_succeeded(conn, attempt.id, &confirmation).await?;
             insert_payment_event(conn, &attempt, &confirmation).await?;
+            if confirmation.notifications_enabled {
+                notifications::enqueue_payment_confirmed(
+                    conn,
+                    &order,
+                    &attempt,
+                    confirmation.provider_transaction_id,
+                    confirmation.paid_at,
+                    false,
+                )
+                .await?;
+            }
             tracing::error!(
                 order_id = %order.id,
                 payment_attempt_id = %attempt.id,
@@ -216,6 +230,17 @@ pub async fn confirm_payment(
         deliver_order_inventory(conn, &order, confirmation.paid_at).await?;
         mark_attempt_succeeded(conn, attempt.id, &confirmation).await?;
         insert_payment_event(conn, &attempt, &confirmation).await?;
+        if confirmation.notifications_enabled {
+            notifications::enqueue_payment_confirmed(
+                conn,
+                &order,
+                &attempt,
+                confirmation.provider_transaction_id,
+                confirmation.paid_at,
+                true,
+            )
+            .await?;
+        }
 
         tracing::info!(
             order_id = %order.id,

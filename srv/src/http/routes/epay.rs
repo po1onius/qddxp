@@ -344,6 +344,7 @@ async fn apply_notify(state: &AppState, notify: EpayNotifyRequest) -> Result<(),
             currency: "CNY",
             paid_at: Utc::now(),
             request_body: &request_body,
+            notifications_enabled: state.telegram.is_some(),
         },
     )
     .await?;
@@ -462,6 +463,7 @@ mod tests {
                 key: "merchant-secret".to_string(),
             }),
             wechatpay: None,
+            telegram: None,
         };
         let order_id =
             Uuid::parse_str("019c2ddf-78fb-7fe0-8ed8-22577c255c83").expect("测试订单 ID 应当有效");

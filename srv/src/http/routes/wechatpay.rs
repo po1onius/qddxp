@@ -157,6 +157,7 @@ async fn process_notify(
             currency: &transaction.amount.currency,
             paid_at,
             request_body: body,
+            notifications_enabled: state.telegram.is_some(),
         },
     )
     .await
@@ -258,6 +259,7 @@ pub async fn reconcile_order(
                 currency: &transaction.amount.currency,
                 paid_at,
                 request_body: &request_body,
+                notifications_enabled: state.telegram.is_some(),
             },
         )
         .await?;

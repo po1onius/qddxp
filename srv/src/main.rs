@@ -3,6 +3,7 @@ mod db;
 mod domain;
 mod error;
 mod http;
+mod notifications;
 mod payments;
 mod security;
 
@@ -11,6 +12,7 @@ use std::{net::SocketAddr, sync::Arc};
 use axum::extract::DefaultBodyLimit;
 use config::AppConfig;
 use db::pool::{DbPool, create_pool};
+use notifications::TelegramNotifier;
 use payments::wechatpay::WechatPayClient;
 use time::Duration;
 use tokio::net::TcpListener;
@@ -27,6 +29,7 @@ pub struct AppState {
     pub pool: DbPool,
     pub config: Arc<AppConfig>,
     pub wechatpay: Option<Arc<WechatPayClient>>,
+    pub telegram: Option<Arc<TelegramNotifier>>,
 }
 
 #[tokio::main]
@@ -48,6 +51,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         shop_logo_file = %config.shop_logo_file.display(),
         epay_configured = config.epay.is_some(),
         wechatpay_configured = config.wechatpay.is_some(),
+        telegram_notifications_configured = config.telegram.is_some(),
         rate_limit_trusted_proxy_cidrs = ?config.rate_limit_trusted_proxy_cidrs,
         "application config loaded"
     );
@@ -60,12 +64,24 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         .map(WechatPayClient::from_config)
         .transpose()?
         .map(Arc::new);
+    let telegram = config
+        .telegram
+        .as_ref()
+        .map(TelegramNotifier::from_config)
+        .transpose()?
+        .map(Arc::new);
     let state = AppState {
         pool,
         config: Arc::clone(&config),
         wechatpay,
+        telegram,
     };
     tokio::spawn(payments::expiration::run(state.clone()));
+    if state.telegram.is_some() {
+        tokio::spawn(notifications::run(state.clone()));
+    } else {
+        tracing::info!("Telegram notification worker disabled because it is not configured");
+    }
 
     let cors = CorsLayer::new()
         .allow_origin(Any)
