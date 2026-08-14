@@ -146,6 +146,7 @@ async fn process_notify(
 
     confirm_payment(
         &state.pool,
+        state.telegram.clone(),
         PaymentConfirmation {
             provider: PaymentProvider::Wechatpay.as_ref(),
             provider_event_id: &notification.id,
@@ -157,7 +158,6 @@ async fn process_notify(
             currency: &transaction.amount.currency,
             paid_at,
             request_body: body,
-            notifications_enabled: state.telegram.is_some(),
         },
     )
     .await
@@ -248,6 +248,7 @@ pub async fn reconcile_order(
             .map_err(|error| AppError::BadRequest(error.to_string()))?;
         confirm_payment(
             &state.pool,
+            state.telegram.clone(),
             PaymentConfirmation {
                 provider: PaymentProvider::Wechatpay.as_ref(),
                 provider_event_id: &provider_event_id,
@@ -259,7 +260,6 @@ pub async fn reconcile_order(
                 currency: &transaction.amount.currency,
                 paid_at,
                 request_body: &request_body,
-                notifications_enabled: state.telegram.is_some(),
             },
         )
         .await?;

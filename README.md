@@ -222,6 +222,7 @@ docker compose -f deploy/compose.yml up -d pgbackrest-backup qddxp
 | `SHOP_LOGO_FILE` | 是 | SVG Logo 文件，启动时校验真实内容；Docker 部署时填写宿主机文件路径 |
 | `ORDER_PASSWORD_PEPPER` | 否 | 订单密码哈希 pepper，生产环境务必修改 |
 | `RATE_LIMIT_TRUSTED_PROXY_CIDRS` | 否 | 允许提供 `X-Forwarded-For` 的反向代理 CIDR，多个值用逗号分隔；直连部署留空 |
+| `TELEGRAM_BOT_TOKEN` / `TELEGRAM_NOTIFY_CHAT_ID` | 否 | 两项同时设置后启用下单与付款单次通知；发送失败只记日志，不重试 |
 | `PGBR_SCHEDULE_HOUR_UTC` | 否 | pgBackRest 每日计划小时（UTC），默认 `3` |
 | `PGBR_CHECK_INTERVAL_SECONDS` | 否 | pgBackRest 调度检查间隔秒数，默认 `300` |
 | `WXPAY_EXPIRE_MINUTES` | 否 | 微信官方 Native 支付结束分钟数，默认 15，范围 1–120；ePay 固定为 3 分钟 |

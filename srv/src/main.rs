@@ -77,11 +77,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         telegram,
     };
     tokio::spawn(payments::expiration::run(state.clone()));
-    if state.telegram.is_some() {
-        tokio::spawn(notifications::run(state.clone()));
-    } else {
-        tracing::info!("Telegram notification worker disabled because it is not configured");
-    }
+    tracing::info!(
+        telegram_notifications_enabled = state.telegram.is_some(),
+        "Telegram notifications use single-attempt asynchronous delivery"
+    );
 
     let cors = CorsLayer::new()
         .allow_origin(Any)

@@ -300,6 +300,7 @@ async fn apply_success(
         .map_err(|error| AppError::BadRequest(error.to_string()))?;
     confirm_payment(
         &state.pool,
+        state.telegram.clone(),
         PaymentConfirmation {
             provider: PaymentProvider::Wechatpay.as_ref(),
             provider_event_id: &event_id,
@@ -311,7 +312,6 @@ async fn apply_success(
             currency: &transaction.amount.currency,
             paid_at,
             request_body: &body,
-            notifications_enabled: state.telegram.is_some(),
         },
     )
     .await?;

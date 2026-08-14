@@ -132,26 +132,3 @@ CREATE INDEX api_call_logs_api_name_created_at_idx
 ON api_call_logs(api_name, created_at DESC);
 CREATE INDEX api_call_logs_created_at_id_idx
 ON api_call_logs(created_at DESC, id DESC);
-
--- 通知 Outbox 与业务数据使用同一个 PostgreSQL 事务提交，避免订单已经落库但通知事件丢失。
--- 项目明确禁止外键，因此这里只保存业务事件的唯一键和完整快照，不关联订单或支付表。
-CREATE TABLE notification_outbox (
-    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    event_key TEXT NOT NULL UNIQUE,
-    event_type TEXT NOT NULL CHECK (event_type IN ('order.created', 'payment.confirmed')),
-    payload JSONB NOT NULL,
-    status TEXT NOT NULL DEFAULT 'pending'
-        CHECK (status IN ('pending', 'processing', 'sent')),
-    attempt_count INTEGER NOT NULL DEFAULT 0 CHECK (attempt_count >= 0),
-    next_attempt_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-    locked_until TIMESTAMPTZ,
-    last_error TEXT,
-    telegram_message_id BIGINT,
-    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-    updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-    sent_at TIMESTAMPTZ
-);
-
--- Worker 只扫描待发送事件和租约过期的处理中事件；按下一次执行时间排序可优先重试旧任务。
-CREATE INDEX notification_outbox_delivery_idx
-ON notification_outbox(status, next_attempt_at, created_at);

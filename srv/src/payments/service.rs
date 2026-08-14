@@ -1,3 +1,5 @@
+use std::sync::Arc;
+
 use chrono::{DateTime, Utc};
 use diesel::prelude::*;
 use diesel_async::{AsyncConnection, RunQueryDsl};
@@ -11,7 +13,7 @@ use crate::{
     },
     domain::{OrderStatus, PaymentAttemptState, PaymentProvider, ProductStatus},
     error::AppError,
-    notifications,
+    notifications::{self, TelegramNotifier},
 };
 
 /// 已经由具体支付协议完成验签、解密和商户身份校验后的统一收款事实。
@@ -27,8 +29,6 @@ pub struct PaymentConfirmation<'a> {
     pub currency: &'a str,
     pub paid_at: DateTime<Utc>,
     pub request_body: &'a str,
-    /// 未配置 Telegram 时不积压 Outbox，防止将来启用功能后补发历史交易消息。
-    pub notifications_enabled: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -44,10 +44,11 @@ pub enum ConfirmPaymentOutcome {
 /// 支付回调和主动查单都必须调用此函数，保证任何入口都不会重复发货。
 pub async fn confirm_payment(
     pool: &DbPool,
+    notifier: Option<Arc<TelegramNotifier>>,
     confirmation: PaymentConfirmation<'_>,
 ) -> Result<ConfirmPaymentOutcome, AppError> {
     let mut conn = pool.get().await?;
-    conn.transaction::<_, AppError, _>(async move |conn| {
+    let (outcome, notification) = conn.transaction::<_, AppError, _>(async move |conn| {
         tracing::debug!(
             provider = confirmation.provider,
             merchant_trade_no = confirmation.merchant_trade_no,
@@ -100,7 +101,7 @@ pub async fn confirm_payment(
                 provider_event_id = confirmation.provider_event_id,
                 "duplicate payment event ignored"
             );
-            return Ok(ConfirmPaymentOutcome::AlreadyApplied);
+            return Ok((ConfirmPaymentOutcome::AlreadyApplied, None));
         }
 
         if attempt.amount_cents != confirmation.amount_cents
@@ -141,7 +142,7 @@ pub async fn confirm_payment(
             }
 
             insert_payment_event(conn, &attempt, &confirmation).await?;
-            return Ok(ConfirmPaymentOutcome::AlreadyApplied);
+            return Ok((ConfirmPaymentOutcome::AlreadyApplied, None));
         }
 
         let order = orders::table
@@ -182,17 +183,6 @@ pub async fn confirm_payment(
                 .await?;
             mark_attempt_succeeded(conn, attempt.id, &confirmation).await?;
             insert_payment_event(conn, &attempt, &confirmation).await?;
-            if confirmation.notifications_enabled {
-                notifications::enqueue_payment_confirmed(
-                    conn,
-                    &order,
-                    &attempt,
-                    confirmation.provider_transaction_id,
-                    confirmation.paid_at,
-                    false,
-                )
-                .await?;
-            }
             tracing::error!(
                 order_id = %order.id,
                 payment_attempt_id = %attempt.id,
@@ -201,7 +191,17 @@ pub async fn confirm_payment(
                 paid_at = %confirmation.paid_at,
                 "payment received after inventory reservation expired; payment recorded without delivery"
             );
-            return Ok(ConfirmPaymentOutcome::RecordedAfterExpiry);
+            let notification = (
+                order,
+                attempt,
+                confirmation.provider_transaction_id.to_string(),
+                confirmation.paid_at,
+                false,
+            );
+            return Ok((
+                ConfirmPaymentOutcome::RecordedAfterExpiry,
+                Some(notification),
+            ));
         }
 
         if order.status == OrderStatus::Paid.as_ref() {
@@ -230,17 +230,6 @@ pub async fn confirm_payment(
         deliver_order_inventory(conn, &order, confirmation.paid_at).await?;
         mark_attempt_succeeded(conn, attempt.id, &confirmation).await?;
         insert_payment_event(conn, &attempt, &confirmation).await?;
-        if confirmation.notifications_enabled {
-            notifications::enqueue_payment_confirmed(
-                conn,
-                &order,
-                &attempt,
-                confirmation.provider_transaction_id,
-                confirmation.paid_at,
-                true,
-            )
-            .await?;
-        }
 
         tracing::info!(
             order_id = %order.id,
@@ -250,9 +239,29 @@ pub async fn confirm_payment(
             amount_cents = confirmation.amount_cents,
             "trusted payment confirmation applied"
         );
-        Ok(ConfirmPaymentOutcome::Applied)
+        let notification = (
+            order,
+            attempt,
+            confirmation.provider_transaction_id.to_string(),
+            confirmation.paid_at,
+            true,
+        );
+        Ok((ConfirmPaymentOutcome::Applied, Some(notification)))
     })
-    .await
+    .await?;
+
+    // 通知严格位于事务提交之后。任务只发送一次，失败不会改变已经提交的支付与库存状态。
+    if let Some((order, attempt, provider_transaction_id, paid_at, delivered)) = notification {
+        notifications::notify_payment_confirmed(
+            notifier,
+            &order,
+            &attempt,
+            &provider_transaction_id,
+            paid_at,
+            delivered,
+        );
+    }
+    Ok(outcome)
 }
 
 fn is_epay_paid_after_deadline(

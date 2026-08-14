@@ -333,6 +333,7 @@ async fn apply_notify(state: &AppState, notify: EpayNotifyRequest) -> Result<(),
 
     confirm_payment(
         &state.pool,
+        state.telegram.clone(),
         PaymentConfirmation {
             provider: PaymentProvider::Epay.as_ref(),
             provider_event_id: &provider_event_id,
@@ -344,7 +345,6 @@ async fn apply_notify(state: &AppState, notify: EpayNotifyRequest) -> Result<(),
             currency: "CNY",
             paid_at: Utc::now(),
             request_body: &request_body,
-            notifications_enabled: state.telegram.is_some(),
         },
     )
     .await?;

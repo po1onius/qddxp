@@ -382,7 +382,6 @@ pub async fn create_order(
         PaymentProvider::Epay => EPAY_RESERVATION_MINUTES,
         PaymentProvider::Wechatpay => state.config.wechatpay_expire_minutes,
     };
-    let notifications_enabled = state.telegram.is_some();
     tracing::info!(
         %product_info_id,
         payment_provider = payment_provider.as_ref(),
@@ -464,10 +463,6 @@ pub async fn create_order(
                 })
                 .get_result(conn)
                 .await?;
-            if notifications_enabled {
-                // Outbox 与订单、库存预占在同一事务提交；事务回滚时不会留下幽灵通知。
-                notifications::enqueue_order_created(conn, &order, &payment_attempt).await?;
-            }
             tracing::info!(
                 order_id = %order.id,
                 %product_info_id,
@@ -490,6 +485,8 @@ pub async fn create_order(
             return Err(error);
         }
     };
+    // Telegram 是非关键旁路：只有订单事务成功提交后才异步发送一次，发送结果不影响订单。
+    notifications::notify_order_created(state.telegram.clone(), &order, &payment_attempt);
 
     let mut response_status = order.status.clone();
     let (payment_action, payment_error) = match payment_provider {

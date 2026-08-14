@@ -5,8 +5,7 @@ use serde_json::Value;
 use uuid::Uuid;
 
 use crate::db::schema::{
-    api_call_logs, notification_outbox, orders, payment_attempts, payment_events, product_info,
-    products,
+    api_call_logs, orders, payment_attempts, payment_events, product_info, products,
 };
 
 #[derive(Debug, Clone, Queryable, Identifiable, Serialize)]
@@ -36,33 +35,6 @@ pub struct NewApiCallLog<'a> {
     pub response_body: &'a str,
     pub success: bool,
     pub error_message: Option<&'a str>,
-}
-
-#[derive(Debug, Clone, Queryable, Identifiable)]
-#[diesel(table_name = notification_outbox)]
-pub struct NotificationOutbox {
-    pub id: Uuid,
-    pub event_key: String,
-    pub event_type: String,
-    pub payload: Value,
-    pub status: String,
-    pub attempt_count: i32,
-    pub next_attempt_at: DateTime<Utc>,
-    pub locked_until: Option<DateTime<Utc>>,
-    pub last_error: Option<String>,
-    pub telegram_message_id: Option<i64>,
-    pub created_at: DateTime<Utc>,
-    pub updated_at: DateTime<Utc>,
-    pub sent_at: Option<DateTime<Utc>>,
-}
-
-#[derive(Debug, Insertable)]
-#[diesel(table_name = notification_outbox)]
-pub struct NewNotificationOutbox<'a> {
-    pub id: Uuid,
-    pub event_key: &'a str,
-    pub event_type: &'a str,
-    pub payload: &'a Value,
 }
 
 #[derive(Debug, Clone, Queryable, Identifiable, Serialize)]

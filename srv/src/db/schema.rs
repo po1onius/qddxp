@@ -21,27 +21,6 @@ diesel::table! {
     use diesel::sql_types::*;
     use diesel::sql_types::Timestamptz;
 
-    notification_outbox (id) {
-        id -> Uuid,
-        event_key -> Text,
-        event_type -> Text,
-        payload -> Jsonb,
-        status -> Text,
-        attempt_count -> Int4,
-        next_attempt_at -> Timestamptz,
-        locked_until -> Nullable<Timestamptz>,
-        last_error -> Nullable<Text>,
-        telegram_message_id -> Nullable<Int8>,
-        created_at -> Timestamptz,
-        updated_at -> Timestamptz,
-        sent_at -> Nullable<Timestamptz>,
-    }
-}
-
-diesel::table! {
-    use diesel::sql_types::*;
-    use diesel::sql_types::Timestamptz;
-
     orders (id) {
         id -> Uuid,
         product_id -> Nullable<Uuid>,
@@ -127,7 +106,6 @@ diesel::table! {
 
 diesel::allow_tables_to_appear_in_same_query!(
     api_call_logs,
-    notification_outbox,
     orders,
     payment_attempts,
     payment_events,
