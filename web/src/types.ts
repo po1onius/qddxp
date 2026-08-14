@@ -132,7 +132,7 @@ export type ListOrdersByContactInput = {
   page_size?: number;
 };
 
-export type OrderStatus = 'pending' | 'paid' | 'expired' | 'cancelled';
+export type OrderStatus = 'pending' | 'delivered' | 'expired';
 
 export type ReconcilePaymentResult = {
   status: OrderStatus;
@@ -145,7 +145,7 @@ export type OrderSummary = {
   product_name: string;
   price_cents: number;
   status: OrderStatus;
-  paid_at: string | null;
+  payment_paid_at: string | null;
   created_at: string;
 };
 
@@ -154,7 +154,7 @@ export type OrderDetail = {
   product_info_id: string;
   product_name: string;
   status: OrderStatus;
-  paid_at: string | null;
+  payment_paid_at: string | null;
   contact: string;
   created_at: string;
   content: string | null;
@@ -167,7 +167,7 @@ export type AdminOrder = {
   product_name: string;
   product_content: string | null;
   created_at: string;
-  paid_at: string | null;
+  payment_paid_at: string | null;
   status: OrderStatus | string;
   contact: string;
   payment_provider: string;

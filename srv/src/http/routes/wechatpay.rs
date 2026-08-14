@@ -205,7 +205,6 @@ pub async fn reconcile_order(
     let attempt = payment_attempts::table
         .filter(payment_attempts::order_id.eq(order.id))
         .filter(payment_attempts::provider.eq(PaymentProvider::Wechatpay.as_ref()))
-        .order(payment_attempts::created_at.desc())
         .first::<PaymentAttempt>(&mut conn)
         .await
         .optional()?

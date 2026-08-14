@@ -82,13 +82,16 @@ async fn process_epay_batch(state: &AppState) -> Result<(), AppError> {
     // 不限制候选数量，确保少量永久失败的旧订单不会持续占据固定批次，阻塞后续订单。
     // 查询完成后立即归还连接，实际过期处理仍逐笔开启短事务，避免长事务锁住整批订单。
     let attempts = payment_attempts::table
+        .inner_join(orders::table.on(orders::id.eq(payment_attempts::order_id)))
         .filter(payment_attempts::provider.eq(PaymentProvider::Epay.as_ref()))
         .filter(payment_attempts::state.eq_any([
             PaymentAttemptState::Created.as_ref(),
             PaymentAttemptState::Ready.as_ref(),
         ]))
-        .filter(payment_attempts::expires_at.le(Utc::now()))
-        .order(payment_attempts::expires_at.asc())
+        .filter(orders::status.eq(OrderStatus::Pending.as_ref()))
+        .filter(orders::expires_at.le(Utc::now()))
+        .order(orders::expires_at.asc())
+        .select(payment_attempts::all_columns)
         .load::<PaymentAttempt>(&mut conn)
         .await?;
     drop(conn);
@@ -114,18 +117,18 @@ async fn process_wechatpay_batch(state: &AppState) -> Result<(), AppError> {
     // 每轮只取固定数量，防止积压时一次创建无上限的网络请求。失败候选会更新 updated_at
     // 并排到队尾，因此少量永久失败订单不会持续占住固定批次。
     let attempts = payment_attempts::table
+        .inner_join(orders::table.on(orders::id.eq(payment_attempts::order_id)))
         .filter(payment_attempts::provider.eq(PaymentProvider::Wechatpay.as_ref()))
         .filter(payment_attempts::state.eq_any([
             PaymentAttemptState::Created.as_ref(),
             PaymentAttemptState::Ready.as_ref(),
             PaymentAttemptState::Failed.as_ref(),
         ]))
-        .filter(payment_attempts::expires_at.le(Utc::now()))
-        .order((
-            payment_attempts::updated_at.asc(),
-            payment_attempts::expires_at.asc(),
-        ))
+        .filter(orders::status.eq(OrderStatus::Pending.as_ref()))
+        .filter(orders::expires_at.le(Utc::now()))
+        .order((payment_attempts::updated_at.asc(), orders::expires_at.asc()))
         .limit(WXPAY_BATCH_SIZE)
+        .select(payment_attempts::all_columns)
         .load::<PaymentAttempt>(&mut conn)
         .await?;
     drop(conn);
@@ -335,20 +338,20 @@ async fn expire_reserved_attempt(
         if locked_attempt.state == PaymentAttemptState::Succeeded.as_ref() {
             return Ok(());
         }
-        if locked_attempt.expires_at > Utc::now() {
-            tracing::debug!(
-                payment_attempt_id = %locked_attempt.id,
-                expires_at = %locked_attempt.expires_at,
-                "stale expiration candidate skipped"
-            );
-            return Ok(());
-        }
         let order = orders::table
             .filter(orders::id.eq(locked_attempt.order_id))
             .for_update()
             .first::<Order>(conn)
             .await?;
         if order.status != OrderStatus::Pending.as_ref() {
+            return Ok(());
+        }
+        if order.expires_at > Utc::now() {
+            tracing::debug!(
+                payment_attempt_id = %locked_attempt.id,
+                expires_at = %order.expires_at,
+                "stale expiration candidate skipped"
+            );
             return Ok(());
         }
 

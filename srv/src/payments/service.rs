@@ -168,7 +168,7 @@ pub async fn confirm_payment(
         let epay_paid_after_deadline = is_epay_paid_after_deadline(
             &attempt.provider,
             confirmation.paid_at,
-            attempt.expires_at,
+            order.expires_at,
         );
         if epay_paid_after_deadline && order.status == OrderStatus::Pending.as_ref() {
             release_reserved_inventory_for_late_payment(conn, &order, attempt.id).await?;
@@ -177,10 +177,6 @@ pub async fn confirm_payment(
         if order.status == OrderStatus::Expired.as_ref() || epay_paid_after_deadline {
             // 超时任务已经释放了库存。此后即使收到验签成功的支付通知，也只能记录收款事实；
             // 禁止重新分配库存，否则同一条卡密可能已被另一张订单预占或交付。
-            diesel::update(orders::table.filter(orders::id.eq(order.id)))
-                .set(orders::paid_at.eq(Some(confirmation.paid_at)))
-                .execute(conn)
-                .await?;
             mark_attempt_succeeded(conn, attempt.id, &confirmation).await?;
             insert_payment_event(conn, &attempt, &confirmation).await?;
             tracing::error!(
@@ -204,15 +200,15 @@ pub async fn confirm_payment(
             ));
         }
 
-        if order.status == OrderStatus::Paid.as_ref() {
+        if order.status == OrderStatus::Delivered.as_ref() {
             tracing::error!(
                 order_id = %order.id,
                 payment_attempt_id = %attempt.id,
                 order_status = %order.status,
-                "paid order references a non-succeeded payment attempt"
+                "delivered order references a non-succeeded payment attempt"
             );
             return Err(AppError::Conflict(
-                "order already paid by another payment attempt".to_string(),
+                "order was delivered by another payment confirmation".to_string(),
             ));
         }
         if order.status != OrderStatus::Pending.as_ref() {
@@ -227,7 +223,7 @@ pub async fn confirm_payment(
             ));
         }
 
-        deliver_order_inventory(conn, &order, confirmation.paid_at).await?;
+        deliver_order_inventory(conn, &order).await?;
         mark_attempt_succeeded(conn, attempt.id, &confirmation).await?;
         insert_payment_event(conn, &attempt, &confirmation).await?;
 
@@ -367,7 +363,6 @@ async fn insert_payment_event(
 async fn deliver_order_inventory(
     conn: &mut diesel_async::AsyncPgConnection,
     order: &Order,
-    paid_at: DateTime<Utc>,
 ) -> Result<(), AppError> {
     let product_id = order.product_id.ok_or_else(|| {
         tracing::error!(order_id = %order.id, "pending order is missing reserved inventory id");
@@ -398,10 +393,7 @@ async fn deliver_order_inventory(
     }
 
     diesel::update(orders::table.filter(orders::id.eq(order.id)))
-        .set((
-            orders::status.eq(OrderStatus::Paid.as_ref()),
-            orders::paid_at.eq(Some(paid_at)),
-        ))
+        .set(orders::status.eq(OrderStatus::Delivered.as_ref()))
         .execute(conn)
         .await?;
     diesel::update(products::table.filter(products::id.eq(product_id)))

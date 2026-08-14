@@ -32,7 +32,7 @@ CREATE UNIQUE INDEX products_info_content_sha256_unique_idx
 ON products(product_info_id, digest(content, 'sha256'));
 
 -- 订单保存下单时的商品名称、金额和币种快照，后续修改商品定义不会影响已创建订单。
--- 待支付和已支付订单必须由应用层保证持有有效的 product_id；超时释放库存后清空该字段。
+-- 待支付和已交付订单持有库存 ID；超时或取消释放库存时必须清空该字段。
 -- product_id 和 product_info_id 均为逻辑关联，不创建数据库外键。
 CREATE TABLE orders (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -43,24 +43,28 @@ CREATE TABLE orders (
     currency TEXT NOT NULL DEFAULT 'CNY' CHECK (currency = 'CNY'),
     created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
     expires_at TIMESTAMPTZ NOT NULL,
-    paid_at TIMESTAMPTZ,
     status TEXT NOT NULL DEFAULT 'pending'
-        CHECK (status IN ('pending', 'paid', 'expired', 'cancelled')),
+        CHECK (status IN ('pending', 'delivered', 'expired')),
     -- PostgreSQL 的 char_length 按字符而非 UTF-8 字节计数，与应用层校验语义一致。
     contact TEXT NOT NULL CHECK (char_length(contact) <= 50),
-    order_password_hash TEXT NOT NULL
+    order_password_hash TEXT NOT NULL,
+    CONSTRAINT orders_inventory_state_check CHECK (
+        (status IN ('pending', 'delivered') AND product_id IS NOT NULL)
+        OR (status = 'expired' AND product_id IS NULL)
+    )
 );
 
 CREATE INDEX orders_created_at_id_idx ON orders(created_at DESC, id DESC);
 CREATE INDEX orders_contact_created_at_id_idx ON orders(contact, created_at DESC, id DESC);
-CREATE INDEX orders_status_idx ON orders(status);
 CREATE INDEX orders_product_info_status_idx ON orders(product_info_id, status);
+CREATE INDEX orders_status_expires_idx ON orders(status, expires_at);
 
--- 每次支付尝试独立保存协议、金额快照和上游状态。provider/channel 使用组合约束，
--- 从数据库层阻止 epay/native、wechatpay/wxpay 等无效组合进入系统。
+-- 每张订单只创建一条支付尝试，独立保存协议、金额快照和上游支付事实。
+-- provider/channel 使用组合约束，从数据库层阻止无效组合进入系统。
 CREATE TABLE payment_attempts (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    order_id UUID NOT NULL,
+    -- 当前业务规定一张订单只允许一个支付尝试，避免支付期限和支付事实出现多个来源。
+    order_id UUID NOT NULL UNIQUE,
     provider TEXT NOT NULL,
     channel TEXT NOT NULL,
     merchant_trade_no TEXT NOT NULL UNIQUE,
@@ -70,7 +74,6 @@ CREATE TABLE payment_attempts (
     code_url TEXT,
     amount_cents BIGINT NOT NULL CHECK (amount_cents >= 0),
     currency TEXT NOT NULL DEFAULT 'CNY' CHECK (currency = 'CNY'),
-    expires_at TIMESTAMPTZ NOT NULL,
     created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
     updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
     paid_at TIMESTAMPTZ,
@@ -88,14 +91,10 @@ CREATE TABLE payment_attempts (
     )
 );
 
-CREATE INDEX payment_attempts_order_created_at_idx
-ON payment_attempts(order_id, created_at DESC);
-CREATE INDEX payment_attempts_provider_state_expires_idx
-ON payment_attempts(provider, state, expires_at);
--- 微信支付超时任务按 updated_at 轮转失败候选，避免少量持续失败的旧订单占满批次后
--- 永久阻塞后续订单；provider/state 前缀同时覆盖候选状态筛选。
+-- 微信支付超时任务按 updated_at 轮转失败候选，避免少量持续失败的旧订单占满批次；
+-- 具体库存截止时间只保存在 orders.expires_at，支付尝试不再复制该字段。
 CREATE INDEX payment_attempts_provider_state_updated_idx
-ON payment_attempts(provider, state, updated_at, expires_at);
+ON payment_attempts(provider, state, updated_at);
 
 -- 支付事件用于回调、主动查单等入口的幂等和审计；同一提供方事件只能入账一次。
 CREATE TABLE payment_events (

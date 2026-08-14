@@ -90,7 +90,6 @@ pub struct Order {
     pub currency: String,
     pub created_at: DateTime<Utc>,
     pub expires_at: DateTime<Utc>,
-    pub paid_at: Option<DateTime<Utc>>,
     pub status: String,
     pub contact: String,
     pub order_password_hash: String,
@@ -124,7 +123,6 @@ pub struct PaymentAttempt {
     pub code_url: Option<String>,
     pub amount_cents: i64,
     pub currency: String,
-    pub expires_at: DateTime<Utc>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
     pub paid_at: Option<DateTime<Utc>>,
@@ -141,7 +139,6 @@ pub struct NewPaymentAttempt<'a> {
     pub state: &'a str,
     pub amount_cents: i64,
     pub currency: &'a str,
-    pub expires_at: DateTime<Utc>,
 }
 
 #[derive(Debug, Insertable)]

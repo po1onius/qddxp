@@ -86,7 +86,7 @@ pub enum PaymentAction {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum PublishPaymentAttemptOutcome {
     Ready,
-    AlreadyPaid,
+    AlreadyDelivered,
     Unavailable,
 }
 
@@ -118,7 +118,7 @@ pub struct OrderSummaryResponse {
     pub product_name: String,
     pub price_cents: i64,
     pub status: String,
-    pub paid_at: Option<DateTime<Utc>>,
+    pub payment_paid_at: Option<DateTime<Utc>>,
     pub created_at: DateTime<Utc>,
 }
 
@@ -128,7 +128,7 @@ pub struct OrderDetailResponse {
     pub product_info_id: Uuid,
     pub product_name: String,
     pub status: String,
-    pub paid_at: Option<DateTime<Utc>>,
+    pub payment_paid_at: Option<DateTime<Utc>>,
     pub contact: String,
     pub created_at: DateTime<Utc>,
     pub content: Option<String>,
@@ -167,7 +167,7 @@ pub async fn list_products(
         .map(|product| product.id)
         .collect::<Vec<_>>();
     let stock_counts = available_stock_counts(&mut conn, &product_ids).await?;
-    let sold_counts = paid_order_counts(&mut conn, &product_ids).await?;
+    let sold_counts = delivered_order_counts(&mut conn, &product_ids).await?;
 
     let products = product_infos
         .into_iter()
@@ -221,7 +221,7 @@ pub async fn get_product(
 
     let product_ids = [product.id];
     let stock_counts = available_stock_counts(&mut conn, &product_ids).await?;
-    let sold_counts = paid_order_counts(&mut conn, &product_ids).await?;
+    let sold_counts = delivered_order_counts(&mut conn, &product_ids).await?;
     let response = ProductListItem {
         id: product.id,
         image_base64: product.image_base64,
@@ -293,7 +293,7 @@ async fn available_stock_counts(
     Ok(counts.into_iter().collect())
 }
 
-async fn paid_order_counts(
+async fn delivered_order_counts(
     conn: &mut diesel_async::AsyncPgConnection,
     product_info_ids: &[Uuid],
 ) -> Result<HashMap<Uuid, i64>, AppError> {
@@ -303,7 +303,7 @@ async fn paid_order_counts(
 
     let counts = orders::table
         .filter(orders::product_info_id.eq_any(product_info_ids))
-        .filter(orders::status.eq(OrderStatus::Paid.as_ref()))
+        .filter(orders::status.eq(OrderStatus::Delivered.as_ref()))
         .group_by(orders::product_info_id)
         .select((orders::product_info_id, count_star()))
         .load::<(Uuid, i64)>(conn)
@@ -463,7 +463,6 @@ pub async fn create_order(
                     state: PaymentAttemptState::Created.as_ref(),
                     amount_cents: product_price_cents,
                     currency: "CNY",
-                    expires_at,
                 })
                 .get_result(conn)
                 .await?;
@@ -515,8 +514,8 @@ pub async fn create_order(
                     );
                     (Some(PaymentAction::Redirect { url: payment_url }), None)
                 }
-                PublishPaymentAttemptOutcome::AlreadyPaid => {
-                    response_status = OrderStatus::Paid.as_ref().to_string();
+                PublishPaymentAttemptOutcome::AlreadyDelivered => {
+                    response_status = OrderStatus::Delivered.as_ref().to_string();
                     (None, None)
                 }
                 PublishPaymentAttemptOutcome::Unavailable => (
@@ -536,7 +535,7 @@ pub async fn create_order(
                     &payment_attempt.merchant_trade_no,
                     order.id,
                     order.amount_cents,
-                    payment_attempt.expires_at,
+                    order.expires_at,
                 )
                 .await
             {
@@ -551,12 +550,12 @@ pub async fn create_order(
                         PublishPaymentAttemptOutcome::Ready => (
                             Some(PaymentAction::QrCode {
                                 content: prepay.code_url,
-                                expires_at: payment_attempt.expires_at,
+                                expires_at: order.expires_at,
                             }),
                             None,
                         ),
-                        PublishPaymentAttemptOutcome::AlreadyPaid => {
-                            response_status = OrderStatus::Paid.as_ref().to_string();
+                        PublishPaymentAttemptOutcome::AlreadyDelivered => {
+                            response_status = OrderStatus::Delivered.as_ref().to_string();
                             (None, None)
                         }
                         PublishPaymentAttemptOutcome::Unavailable => {
@@ -635,27 +634,27 @@ async fn publish_payment_attempt_ready(
             .await?;
 
         if locked_attempt.state == PaymentAttemptState::Succeeded.as_ref()
-            || order.status == OrderStatus::Paid.as_ref()
+            || order.status == OrderStatus::Delivered.as_ref()
         {
             tracing::info!(
                 order_id = %order.id,
                 payment_attempt_id = %locked_attempt.id,
                 "payment completed before prepared entry was published"
             );
-            return Ok(PublishPaymentAttemptOutcome::AlreadyPaid);
+            return Ok(PublishPaymentAttemptOutcome::AlreadyDelivered);
         }
 
         let now = Utc::now();
         if locked_attempt.state != PaymentAttemptState::Created.as_ref()
             || order.status != OrderStatus::Pending.as_ref()
-            || locked_attempt.expires_at <= now
+            || order.expires_at <= now
         {
             tracing::warn!(
                 order_id = %order.id,
                 payment_attempt_id = %locked_attempt.id,
                 attempt_state = %locked_attempt.state,
                 order_status = %order.status,
-                expires_at = %locked_attempt.expires_at,
+                expires_at = %order.expires_at,
                 "prepared payment entry was not published because local reservation is unavailable"
             );
             return Ok(PublishPaymentAttemptOutcome::Unavailable);
@@ -757,6 +756,7 @@ pub async fn list_orders_by_contact(
         .await?;
 
     let orders = orders::table
+        .inner_join(payment_attempts::table.on(payment_attempts::order_id.eq(orders::id)))
         .filter(orders::contact.eq(contact))
         .select((
             orders::id,
@@ -764,7 +764,7 @@ pub async fn list_orders_by_contact(
             orders::product_name_snapshot,
             orders::amount_cents,
             orders::status,
-            orders::paid_at,
+            payment_attempts::paid_at,
             orders::created_at,
         ))
         .order((orders::created_at.desc(), orders::id.desc()))
@@ -805,9 +805,13 @@ pub async fn query_order(
     tracing::info!(%order_id, "querying order detail");
 
     let mut conn = state.pool.get().await?;
-    let order = orders::table
+    // 订单交付状态与支付时间来自两个职责清晰的表，必须在同一条 SQL 中读取，避免支付
+    // 确认事务恰好并发提交时向客户端返回跨时刻拼接的状态。
+    let (order, payment_paid_at) = orders::table
+        .inner_join(payment_attempts::table.on(payment_attempts::order_id.eq(orders::id)))
         .filter(orders::id.eq(order_id))
-        .first::<Order>(&mut conn)
+        .select((orders::all_columns, payment_attempts::paid_at))
+        .first::<(Order, Option<DateTime<Utc>>)>(&mut conn)
         .await
         .optional()?
         .ok_or_else(|| AppError::NotFound("order not found".to_string()))?;
@@ -821,7 +825,10 @@ pub async fn query_order(
         return Err(AppError::Unauthorized);
     }
 
-    let content = match (order.status == OrderStatus::Paid.as_ref(), order.product_id) {
+    let content = match (
+        order.status == OrderStatus::Delivered.as_ref(),
+        order.product_id,
+    ) {
         (true, Some(product_id)) => products::table
             .filter(products::id.eq(product_id))
             .select(products::content)
@@ -836,7 +843,7 @@ pub async fn query_order(
         product_info_id: order.product_info_id,
         product_name: order.product_name_snapshot,
         status: order.status,
-        paid_at: order.paid_at,
+        payment_paid_at,
         contact: order.contact,
         created_at: order.created_at,
         content,

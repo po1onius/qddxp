@@ -1642,7 +1642,7 @@ function OrdersPanel({
                 </td>
                 <td className="max-w-[180px] px-3 py-2 text-slate-600">{order.contact}</td>
                 <td className="px-3 py-2">
-                  <OrderStatusBadge paidAt={order.paid_at} status={order.status} />
+                  <OrderStatusBadge paymentPaidAt={order.payment_paid_at} status={order.status} />
                 </td>
                 <td className="max-w-[220px] px-3 py-2 text-xs text-slate-600">
                   <p className="font-medium text-slate-800">{paymentMethodText(order.payment_provider, order.payment_channel)}</p>
@@ -1652,7 +1652,7 @@ function OrdersPanel({
                 <td className="px-3 py-2 text-slate-600">{formatDate(order.created_at)}</td>
                 <td className="max-w-[260px] px-3 py-2">
                   <pre className="max-h-20 overflow-auto whitespace-pre-wrap break-words rounded-md bg-slate-50 p-2 text-xs text-slate-700">
-                    {isPaidAfterExpiry(order.status, order.paid_at)
+                    {isPaymentReceivedAfterExpiry(order.status, order.payment_paid_at)
                       ? '异常订单，联系管理员处理'
                       : order.product_content ?? '未发货'}
                   </pre>
@@ -1818,19 +1818,19 @@ function ProductStatusBadge({ status }: { status: string }) {
   return <span className={`inline-flex rounded-md px-2 py-1 text-xs font-medium ${className}`}>{productStatusText(status)}</span>;
 }
 
-function OrderStatusBadge({ paidAt, status }: { paidAt: string | null; status: string }) {
-  const paid = status === 'paid';
+function OrderStatusBadge({ paymentPaidAt, status }: { paymentPaidAt: string | null; status: string }) {
+  const delivered = status === 'delivered';
   const pending = status === 'pending';
-  const paidAfterExpiry = isPaidAfterExpiry(status, paidAt);
-  const className = paid
+  const paymentReceivedAfterExpiry = isPaymentReceivedAfterExpiry(status, paymentPaidAt);
+  const className = delivered
     ? 'bg-emerald-50 text-emerald-700'
     : pending
       ? 'bg-amber-50 text-amber-700'
-      : paidAfterExpiry
+      : paymentReceivedAfterExpiry
         ? 'bg-red-50 text-red-700'
         : 'bg-slate-100 text-slate-600';
 
-  return <span className={`inline-flex rounded-md px-2 py-1 text-xs font-medium ${className}`}>{statusText(status, paidAt)}</span>;
+  return <span className={`inline-flex rounded-md px-2 py-1 text-xs font-medium ${className}`}>{statusText(status, paymentPaidAt)}</span>;
 }
 
 function LogStatusBadge({ success }: { success: boolean }) {
@@ -2020,19 +2020,18 @@ function imageBase64Src(imageBase64: string) {
   return imageBase64.startsWith('data:') ? imageBase64 : `data:image/png;base64,${imageBase64}`;
 }
 
-function isPaidAfterExpiry(status: string, paidAt: string | null) {
-  return status === 'expired' && paidAt !== null;
+function isPaymentReceivedAfterExpiry(status: string, paymentPaidAt: string | null) {
+  return status === 'expired' && paymentPaidAt !== null;
 }
 
-function statusText(status: string, paidAt: string | null = null) {
-  if (isPaidAfterExpiry(status, paidAt)) {
+function statusText(status: string, paymentPaidAt: string | null = null) {
+  if (isPaymentReceivedAfterExpiry(status, paymentPaidAt)) {
     return '异常订单';
   }
   const texts: Record<string, string> = {
     pending: '待支付',
-    paid: '已支付',
+    delivered: '已交付',
     expired: '已过期',
-    cancelled: '已取消',
   };
   return texts[status] ?? status;
 }

@@ -4,7 +4,6 @@ use strum::{AsRefStr, EnumString};
 #[strum(serialize_all = "snake_case")]
 pub enum OrderStatus {
     Pending,
-    Paid,
+    Delivered,
     Expired,
-    Cancelled,
 }

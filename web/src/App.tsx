@@ -684,7 +684,7 @@ function CheckoutPage({
       }
       try {
         const detail = await queryOrder({ id: qrOrder.id, order_password: orderPassword });
-        if (!stopped && detail.status === 'paid') {
+        if (!stopped && detail.status === 'delivered') {
           stopPolling();
           showToast({ message: '微信支付已确认，正在进入订单详情', type: 'success' });
           onCreated(qrOrder);
@@ -753,7 +753,7 @@ function CheckoutPage({
     setReconciling(true);
     try {
       const result = await reconcileWechatPayOrder(qrOrder.id, orderPassword);
-      if (result.status === 'paid') {
+      if (result.status === 'delivered') {
         showToast({ message: '微信支付已确认', type: 'success' });
         onCreated(qrOrder);
       } else {
@@ -901,11 +901,12 @@ function OrderQueryPage() {
   const [loadingDetail, setLoadingDetail] = useState(false);
   const selectedOrder = orders.find((item) => item.id === selectedOrderId) ?? null;
   const canQuerySelectedOrder = selectedOrder
-    ? selectedOrder.status === 'paid' || isPaidAfterExpiry(selectedOrder.status, selectedOrder.paid_at)
+    ? selectedOrder.status === 'delivered' ||
+      isPaymentReceivedAfterExpiry(selectedOrder.status, selectedOrder.payment_paid_at)
     : paymentReturn.kind === 'success' && Boolean(selectedOrderId);
   const selectedOrderTitle = selectedOrder?.product_name ?? '支付成功';
   const selectedOrderMeta = selectedOrder
-    ? `订单状态：${statusText(selectedOrder.status, selectedOrder.paid_at)}`
+    ? `订单状态：${statusText(selectedOrder.status, selectedOrder.payment_paid_at)}`
     : '订单状态：支付成功';
   const ordersTotalPages = Math.max(1, Math.ceil(ordersTotal / CONTACT_ORDER_PAGE_SIZE));
 
@@ -1090,7 +1091,7 @@ function OrderQueryPage() {
                     <p className="mt-1 text-sm text-slate-500">{formatPrice(item.price_cents)}</p>
                   </div>
                   <div className="flex shrink-0 flex-col items-start gap-2 sm:items-end">
-                    <OrderStatusBadge paidAt={item.paid_at} status={item.status} />
+                    <OrderStatusBadge paymentPaidAt={item.payment_paid_at} status={item.status} />
                     <span className="text-xs text-slate-500">{formatDate(item.created_at)}</span>
                   </div>
                 </div>
@@ -1192,8 +1193,8 @@ function PaymentReturnNotice({ message, type }: { message: string; type: 'succes
 }
 
 function OrderResult({ order }: { order: OrderDetail }) {
-  const paidAfterExpiry = isPaidAfterExpiry(order.status, order.paid_at);
-  if (paidAfterExpiry) {
+  const paymentReceivedAfterExpiry = isPaymentReceivedAfterExpiry(order.status, order.payment_paid_at);
+  if (paymentReceivedAfterExpiry) {
     return (
       <section className="rounded-md border border-red-200 bg-red-50 p-6 shadow-panel">
         <div className="flex items-start gap-3 text-red-800">
@@ -1208,16 +1209,16 @@ function OrderResult({ order }: { order: OrderDetail }) {
     );
   }
 
-  const paid = order.status === 'paid' && Boolean(order.content);
+  const delivered = order.status === 'delivered' && Boolean(order.content);
   const contentText = order.content ?? '支付确认后显示';
 
   return (
     <section className="rounded-md border border-slate-200 bg-white p-6 shadow-panel">
       <div className="flex items-start gap-3">
-        <CheckCircle2 className={paid ? 'text-emerald-600' : 'text-amber-600'} size={22} />
+        <CheckCircle2 className={delivered ? 'text-emerald-600' : 'text-amber-600'} size={22} />
         <div>
           <h3 className="text-base font-semibold">{order.product_name}</h3>
-          <p className="mt-1 text-sm text-slate-500">订单状态：{statusText(order.status, order.paid_at)}</p>
+          <p className="mt-1 text-sm text-slate-500">订单状态：{statusText(order.status, order.payment_paid_at)}</p>
         </div>
       </div>
       <div className="mt-5 rounded-md border border-slate-200 bg-slate-50 p-4">
@@ -1228,19 +1229,19 @@ function OrderResult({ order }: { order: OrderDetail }) {
   );
 }
 
-function OrderStatusBadge({ paidAt, status }: { paidAt: string | null; status: string }) {
-  const paid = status === 'paid';
+function OrderStatusBadge({ paymentPaidAt, status }: { paymentPaidAt: string | null; status: string }) {
+  const delivered = status === 'delivered';
   const pending = status === 'pending';
-  const paidAfterExpiry = isPaidAfterExpiry(status, paidAt);
-  const className = paid
+  const paymentReceivedAfterExpiry = isPaymentReceivedAfterExpiry(status, paymentPaidAt);
+  const className = delivered
     ? 'bg-emerald-50 text-emerald-700'
     : pending
       ? 'bg-amber-50 text-amber-700'
-      : paidAfterExpiry
+      : paymentReceivedAfterExpiry
         ? 'bg-red-50 text-red-700'
         : 'bg-slate-100 text-slate-600';
 
-  return <span className={`inline-flex rounded-md px-2 py-1 text-xs font-medium ${className}`}>{statusText(status, paidAt)}</span>;
+  return <span className={`inline-flex rounded-md px-2 py-1 text-xs font-medium ${className}`}>{statusText(status, paymentPaidAt)}</span>;
 }
 
 function formatDate(value: string) {
@@ -1276,19 +1277,18 @@ function StatusPanel({ products }: { products: Product[] }) {
   );
 }
 
-function isPaidAfterExpiry(status: string, paidAt: string | null) {
-  return status === 'expired' && paidAt !== null;
+function isPaymentReceivedAfterExpiry(status: string, paymentPaidAt: string | null) {
+  return status === 'expired' && paymentPaidAt !== null;
 }
 
-function statusText(status: string, paidAt: string | null = null) {
-  if (isPaidAfterExpiry(status, paidAt)) {
+function statusText(status: string, paymentPaidAt: string | null = null) {
+  if (isPaymentReceivedAfterExpiry(status, paymentPaidAt)) {
     return '异常订单';
   }
   const texts: Record<string, string> = {
     pending: '待支付',
-    paid: '已支付',
+    delivered: '已交付',
     expired: '已过期',
-    cancelled: '已取消',
   };
   return texts[status] ?? status;
 }

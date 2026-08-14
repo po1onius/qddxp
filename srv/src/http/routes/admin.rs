@@ -106,7 +106,7 @@ pub struct AdminOrderResponse {
     pub product_name: String,
     pub product_content: Option<String>,
     pub created_at: DateTime<Utc>,
-    pub paid_at: Option<DateTime<Utc>>,
+    pub payment_paid_at: Option<DateTime<Utc>>,
     pub status: String,
     pub contact: String,
     pub payment_provider: String,
@@ -176,7 +176,7 @@ pub async fn list_product_info(
         .load::<ProductInfo>(&mut conn)
         .await?;
     let product_info_ids = infos.iter().map(|info| info.id).collect::<Vec<_>>();
-    let sold_counts = paid_order_counts(&mut conn, &product_info_ids).await?;
+    let sold_counts = delivered_order_counts(&mut conn, &product_info_ids).await?;
     let infos = infos
         .into_iter()
         .map(|info| {
@@ -213,7 +213,7 @@ pub async fn update_product_info_active(
         "admin updated product info active status"
     );
 
-    let sold_count = paid_order_count(&mut conn, product_info.id).await?;
+    let sold_count = delivered_order_count(&mut conn, product_info.id).await?;
     Ok(Json(product_info_response(product_info, sold_count)))
 }
 
@@ -230,18 +230,18 @@ fn product_info_response(info: ProductInfo, sold_count: i64) -> ProductInfoRespo
     }
 }
 
-async fn paid_order_count(
+async fn delivered_order_count(
     conn: &mut diesel_async::AsyncPgConnection,
     product_info_id: Uuid,
 ) -> Result<i64, AppError> {
-    Ok(paid_order_counts(conn, &[product_info_id])
+    Ok(delivered_order_counts(conn, &[product_info_id])
         .await?
         .get(&product_info_id)
         .copied()
         .unwrap_or(0))
 }
 
-async fn paid_order_counts(
+async fn delivered_order_counts(
     conn: &mut diesel_async::AsyncPgConnection,
     product_info_ids: &[Uuid],
 ) -> Result<HashMap<Uuid, i64>, AppError> {
@@ -251,7 +251,7 @@ async fn paid_order_counts(
 
     let counts = orders::table
         .filter(orders::product_info_id.eq_any(product_info_ids))
-        .filter(orders::status.eq(OrderStatus::Paid.as_ref()))
+        .filter(orders::status.eq(OrderStatus::Delivered.as_ref()))
         .group_by(orders::product_info_id)
         .select((orders::product_info_id, count_star()))
         .load::<(Uuid, i64)>(conn)
@@ -541,7 +541,7 @@ pub async fn list_orders(
             orders::product_name_snapshot,
             products::content.nullable(),
             orders::created_at,
-            orders::paid_at,
+            payment_attempts::paid_at,
             orders::status,
             orders::contact,
             payment_attempts::provider,
