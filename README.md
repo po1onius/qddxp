@@ -22,6 +22,7 @@
 - 订单状态机只表达库存与交付结果：`pending` → `delivered`；超时未支付进入 `expired`
 - 支付事实由支付尝试单独记录：`state=succeeded` 与 `paid_at` 表示已经收款；`expired + succeeded` 表示超时到账但未交付
 - ePay 固定预留库存 3 分钟；超时后到账只记录支付事实并提示联系管理员，不自动发货
+- ePay 支付页面回跳后会归一化进入 `/orders?order_id=<订单号>`，与微信 Native 支付完成后的订单查询地址一致
 - 库存状态机：`available` → `reserved` → `delivered`（另有 `disabled` 下架）
 - 支付回调全链路校验：MD5 签名、商户 PID、金额与订单比对、重复通知幂等处理
 

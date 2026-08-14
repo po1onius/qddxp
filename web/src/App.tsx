@@ -73,16 +73,14 @@ function getPaymentReturnState(): PaymentReturnState {
 }
 
 function getInitialSelectedOrderId(paymentReturn: PaymentReturnState) {
-  if (paymentReturn.kind === 'success') {
+  // ePay 会把下单时的 param 原样带回。无论网关页面报告成功还是失败，只要订单号存在，
+  // 都直接定位到该订单，让用户通过订单密码读取服务端保存的最终支付与交付状态。
+  if (paymentReturn.kind !== 'none' && paymentReturn.orderId) {
     return paymentReturn.orderId;
   }
 
   const params = new URLSearchParams(window.location.search);
-  if (!params.has('trade_status')) {
-    return params.get('order_id') ?? sessionStorage.getItem(LAST_ORDER_ID_STORAGE) ?? '';
-  }
-
-  return '';
+  return params.get('order_id') ?? sessionStorage.getItem(LAST_ORDER_ID_STORAGE) ?? '';
 }
 
 export function App() {
@@ -888,6 +886,7 @@ function CheckoutPage({
 
 function OrderQueryPage() {
   const { showToast } = useToast();
+  const navigate = useNavigate();
   const [paymentReturn] = useState(() => getPaymentReturnState());
   const [contact, setContact] = useState(() => sessionStorage.getItem(LAST_CONTACT_STORAGE) ?? '');
   const [searchedContact, setSearchedContact] = useState('');
@@ -903,12 +902,27 @@ function OrderQueryPage() {
   const canQuerySelectedOrder = selectedOrder
     ? selectedOrder.status === 'delivered' ||
       isPaymentReceivedAfterExpiry(selectedOrder.status, selectedOrder.payment_paid_at)
-    : paymentReturn.kind === 'success' && Boolean(selectedOrderId);
-  const selectedOrderTitle = selectedOrder?.product_name ?? '支付成功';
+    : Boolean(selectedOrderId);
+  const selectedOrderTitle = selectedOrder?.product_name ?? '当前订单';
   const selectedOrderMeta = selectedOrder
     ? `订单状态：${statusText(selectedOrder.status, selectedOrder.payment_paid_at)}`
-    : '订单状态：支付成功';
+    : '订单状态：请输入订单密码查询';
   const ordersTotalPages = Math.max(1, Math.ceil(ordersTotal / CONTACT_ORDER_PAGE_SIZE));
+
+  useEffect(() => {
+    if (paymentReturn.kind === 'none' || !paymentReturn.orderId) {
+      return;
+    }
+
+    // ePay 回跳会附带 trade_no、签名等网关参数。识别出透传订单号后立即替换为与微信
+    // Native 支付一致的具体订单地址，避免刷新或复制链接时继续传播支付网关参数。
+    const orderPath = `${ORDER_QUERY_PAGE_PATH}?order_id=${encodeURIComponent(paymentReturn.orderId)}`;
+    if (`${window.location.pathname}${window.location.search}` === orderPath) {
+      return;
+    }
+    console.info('ePay 回跳已归一化为具体订单查询地址', { orderId: paymentReturn.orderId });
+    navigate(orderPath, { replace: true });
+  }, [navigate, paymentReturn]);
 
   useEffect(() => {
     if (selectedOrderId) {
@@ -1034,7 +1048,9 @@ function OrderQueryPage() {
   return (
     <div className="max-w-3xl space-y-5">
       {paymentReturn.kind === 'error' && <PaymentReturnNotice message={paymentReturn.message} type="error" />}
-      {paymentReturn.kind === 'success' && <PaymentReturnNotice message="支付成功，请输入订单密码查看发货内容" type="success" />}
+      {paymentReturn.kind === 'success' && (
+        <PaymentReturnNotice message="已从支付页面返回，请输入订单密码查询支付与发货结果" type="success" />
+      )}
 
       {paymentReturn.kind !== 'success' && (
         <form className="space-y-5 rounded-md border border-slate-200 bg-white p-6 shadow-panel" onSubmit={searchOrders}>
