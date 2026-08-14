@@ -393,10 +393,14 @@ pub async fn create_order(
     let mut conn = state.pool.get().await?;
     let transaction_result = conn
         .transaction::<_, AppError, _>(async move |conn| {
+            // 锁定商品定义直到订单事务提交，使下单与后台上下架操作严格串行：
+            // 下单先取得锁时，下架必须等待订单落库；下架先提交时，本查询无法再命中
+            // active=true。微信等远端支付准备发生在事务外，因此不会长期持有该行锁。
             let (product_name, product_price_cents) = product_info::table
                 .filter(product_info::id.eq(product_info_id))
                 .filter(product_info::active.eq(true))
                 .select((product_info::name, product_info::price_cents))
+                .for_update()
                 .first::<(String, i64)>(conn)
                 .await
                 .optional()?
