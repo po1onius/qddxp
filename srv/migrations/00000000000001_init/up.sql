@@ -104,8 +104,6 @@ CREATE TABLE payment_events (
     payment_attempt_id UUID NOT NULL,
     event_type TEXT NOT NULL,
     request_body TEXT NOT NULL DEFAULT '',
-    success BOOLEAN NOT NULL,
-    error_message TEXT,
     created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
     UNIQUE (provider, provider_event_id)
 );

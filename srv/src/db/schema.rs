@@ -68,8 +68,6 @@ diesel::table! {
         payment_attempt_id -> Uuid,
         event_type -> Text,
         request_body -> Text,
-        success -> Bool,
-        error_message -> Nullable<Text>,
         created_at -> Timestamptz,
     }
 }

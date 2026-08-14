@@ -150,6 +150,4 @@ pub struct NewPaymentEvent<'a> {
     pub payment_attempt_id: Uuid,
     pub event_type: &'a str,
     pub request_body: &'a str,
-    pub success: bool,
-    pub error_message: Option<&'a str>,
 }

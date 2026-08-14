@@ -352,8 +352,6 @@ async fn insert_payment_event(
             payment_attempt_id: attempt.id,
             event_type: confirmation.event_type,
             request_body: confirmation.request_body,
-            success: true,
-            error_message: None,
         })
         .execute(conn)
         .await?;
