@@ -8,6 +8,11 @@ type HmacSha256 = Hmac<Sha256>;
 const ADMIN_AUTHENTICATED_SESSION_KEY: &str = "admin_authenticated";
 const ADMIN_KEY_VERIFICATION_CONTEXT: &[u8] = b"qddxp-admin-key-verification-v1";
 
+/// 订单密码的长度限制由下单、订单查询和支付查单共享，避免不同入口的规则漂移。
+/// 各入口统一使用 Unicode 字符数校验，不按 UTF-8 字节数计算中文等多字节字符。
+pub const ORDER_PASSWORD_MIN_LENGTH: usize = 6;
+pub const ORDER_PASSWORD_MAX_LENGTH: usize = 50;
+
 /// 使用 HMAC 标签的恒定时间校验比较管理员密钥，避免直接字符串比较过早返回。
 /// 管理员密钥只允许在登录接口出现，认证后的业务请求只读取服务端会话。
 pub fn verify_admin_key(candidate: &str, expected: &str) -> bool {

@@ -14,7 +14,6 @@ import {
   listPaymentMethods,
   listProductPage,
   queryOrder,
-  reconcileWechatPayOrder,
 } from './api/client';
 import type { CreateOrderResult, OrderDetail, OrderSummary, PaymentMethod, Product, StorefrontConfig } from './types';
 
@@ -27,7 +26,10 @@ const LAST_ORDER_ID_STORAGE = 'qddxp_last_order_id';
 const LAST_CONTACT_STORAGE = 'qddxp_last_contact';
 const PRODUCT_PAGE_SIZE = 20;
 const CONTACT_ORDER_PAGE_SIZE = 20;
+const CONTACT_MIN_LENGTH = 6;
 const CONTACT_MAX_LENGTH = 50;
+const ORDER_PASSWORD_MIN_LENGTH = 6;
+const ORDER_PASSWORD_MAX_LENGTH = 50;
 const ADMIN_PAGE_PATH = '/admin';
 const ORDER_QUERY_PAGE_PATH = '/orders';
 const ORDER_CREATE_PAGE_PATH = '/orders/new';
@@ -604,7 +606,6 @@ function CheckoutPage({
   const [qrOrder, setQrOrder] = useState<CreateOrderResult | null>(null);
   const [qrImage, setQrImage] = useState('');
   const [remainingSeconds, setRemainingSeconds] = useState(0);
-  const [reconciling, setReconciling] = useState(false);
 
   useEffect(() => {
     if (!selectedPayment && paymentMethods.length > 0) {
@@ -699,8 +700,22 @@ function CheckoutPage({
 
   async function submit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
-    if (Array.from(contact.trim()).length > CONTACT_MAX_LENGTH) {
+    const contactLength = Array.from(contact.trim()).length;
+    if (contactLength < CONTACT_MIN_LENGTH) {
+      showToast({ message: `联系方式不能少于 ${CONTACT_MIN_LENGTH} 个字符`, type: 'error' });
+      return;
+    }
+    if (contactLength > CONTACT_MAX_LENGTH) {
       showToast({ message: `联系方式不能超过 ${CONTACT_MAX_LENGTH} 个字符`, type: 'error' });
+      return;
+    }
+    const orderPasswordLength = Array.from(orderPassword).length;
+    if (orderPasswordLength < ORDER_PASSWORD_MIN_LENGTH) {
+      showToast({ message: `订单密码不能少于 ${ORDER_PASSWORD_MIN_LENGTH} 个字符`, type: 'error' });
+      return;
+    }
+    if (orderPasswordLength > ORDER_PASSWORD_MAX_LENGTH) {
+      showToast({ message: `订单密码不能超过 ${ORDER_PASSWORD_MAX_LENGTH} 个字符`, type: 'error' });
       return;
     }
     if (product.stock <= 0) {
@@ -744,29 +759,6 @@ function CheckoutPage({
     }
   }
 
-  async function reconcilePayment() {
-    if (!qrOrder) {
-      return;
-    }
-    setReconciling(true);
-    try {
-      const result = await reconcileWechatPayOrder(qrOrder.id, orderPassword);
-      if (result.status === 'delivered') {
-        showToast({ message: '微信支付已确认', type: 'success' });
-        onCreated(qrOrder);
-      } else {
-        showToast({ message: `微信支付状态：${result.trade_state}`, type: 'info' });
-      }
-    } catch (error) {
-      showToast({
-        message: error instanceof Error ? error.message : '微信支付查单失败',
-        type: 'error',
-      });
-    } finally {
-      setReconciling(false);
-    }
-  }
-
   return (
     <form className="max-w-2xl space-y-5 rounded-md border border-slate-200 bg-white p-6 shadow-panel" onSubmit={submit}>
       <p className="text-sm text-slate-500">订单密码用于支付后查询和取货，请自行保存。</p>
@@ -788,6 +780,7 @@ function CheckoutPage({
         <input
           className="mt-2 h-11 w-full rounded-md border border-slate-300 px-3 text-sm outline-none focus:border-slate-900"
           maxLength={CONTACT_MAX_LENGTH}
+          minLength={CONTACT_MIN_LENGTH}
           onChange={(event) => setContact(event.target.value)}
           placeholder="邮箱、QQ 或手机号"
           required
@@ -799,9 +792,10 @@ function CheckoutPage({
         <span className="text-sm font-medium text-slate-700">订单密码</span>
         <input
           className="mt-2 h-11 w-full rounded-md border border-slate-300 px-3 text-sm outline-none focus:border-slate-900"
-          minLength={6}
+          maxLength={ORDER_PASSWORD_MAX_LENGTH}
+          minLength={ORDER_PASSWORD_MIN_LENGTH}
           onChange={(event) => setOrderPassword(event.target.value)}
-          placeholder="至少 6 位"
+          placeholder="6～50 位"
           required
           type="password"
           value={orderPassword}
@@ -867,15 +861,6 @@ function CheckoutPage({
                 ? `请在 ${Math.floor(remainingSeconds / 60)}:${String(remainingSeconds % 60).padStart(2, '0')} 内支付`
                 : '支付二维码已过期，请重新下单'}
             </p>
-            <button
-              className="mt-4 inline-flex h-10 w-full items-center justify-center gap-2 rounded-md bg-emerald-600 px-4 text-sm font-medium text-white disabled:bg-slate-400"
-              disabled={reconciling}
-              onClick={() => void reconcilePayment()}
-              type="button"
-            >
-              <RefreshCcw className={reconciling ? 'animate-spin' : ''} size={17} />
-              {reconciling ? '正在向微信查单' : '我已支付'}
-            </button>
             <p className="mt-3 text-xs leading-5 text-slate-500">支付确认后页面会自动进入订单查询；关闭窗口不会取消订单。</p>
           </div>
         </div>
@@ -937,7 +922,12 @@ function OrderQueryPage() {
       showToast({ message: '请输入下单时填写的联系方式', type: 'error' });
       return;
     }
-    if (Array.from(trimmedContact).length > CONTACT_MAX_LENGTH) {
+    const contactLength = Array.from(trimmedContact).length;
+    if (contactLength < CONTACT_MIN_LENGTH) {
+      showToast({ message: `联系方式不能少于 ${CONTACT_MIN_LENGTH} 个字符`, type: 'error' });
+      return;
+    }
+    if (contactLength > CONTACT_MAX_LENGTH) {
       showToast({ message: `联系方式不能超过 ${CONTACT_MAX_LENGTH} 个字符`, type: 'error' });
       return;
     }
@@ -1029,6 +1019,15 @@ function OrderQueryPage() {
       showToast({ message: '请选择订单', type: 'error' });
       return;
     }
+    const orderPasswordLength = Array.from(orderPassword).length;
+    if (orderPasswordLength < ORDER_PASSWORD_MIN_LENGTH) {
+      showToast({ message: `订单密码不能少于 ${ORDER_PASSWORD_MIN_LENGTH} 个字符`, type: 'error' });
+      return;
+    }
+    if (orderPasswordLength > ORDER_PASSWORD_MAX_LENGTH) {
+      showToast({ message: `订单密码不能超过 ${ORDER_PASSWORD_MAX_LENGTH} 个字符`, type: 'error' });
+      return;
+    }
 
     setLoadingDetail(true);
     setOrder(null);
@@ -1060,6 +1059,7 @@ function OrderQueryPage() {
             <input
               className="mt-2 h-11 w-full rounded-md border border-slate-300 px-3 text-sm outline-none focus:border-slate-900"
               maxLength={CONTACT_MAX_LENGTH}
+              minLength={CONTACT_MIN_LENGTH}
               onChange={(event) => setContact(event.target.value)}
               placeholder="邮箱、QQ 或手机号"
               required
@@ -1143,6 +1143,8 @@ function OrderQueryPage() {
             <span className="text-sm font-medium text-slate-700">订单密码</span>
             <input
               className="mt-2 h-11 w-full rounded-md border border-slate-300 px-3 text-sm outline-none focus:border-slate-900"
+              maxLength={ORDER_PASSWORD_MAX_LENGTH}
+              minLength={ORDER_PASSWORD_MIN_LENGTH}
               onChange={(event) => setOrderPassword(event.target.value)}
               required
               type="password"

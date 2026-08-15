@@ -18,7 +18,31 @@ use serde_json::json;
 const X_FORWARDED_FOR: &str = "x-forwarded-for";
 const ORDER_CREATION_LIMIT_WINDOW: Duration = Duration::from_secs(3 * 60);
 const ORDER_CREATION_LIMIT_MAX_REQUESTS: u32 = 5;
+const ADMIN_LOGIN_LIMIT_WINDOW: Duration = Duration::from_secs(60);
+const ADMIN_LOGIN_LIMIT_MAX_REQUESTS: u32 = 3;
 const CLEANUP_INTERVAL: Duration = Duration::from_secs(60);
+
+#[derive(Clone, Copy, Debug)]
+struct RateLimitPolicy {
+    scope: &'static str,
+    window: Duration,
+    max_requests: u32,
+    error_message: &'static str,
+}
+
+const ORDER_CREATION_POLICY: RateLimitPolicy = RateLimitPolicy {
+    scope: "order_creation",
+    window: ORDER_CREATION_LIMIT_WINDOW,
+    max_requests: ORDER_CREATION_LIMIT_MAX_REQUESTS,
+    error_message: "too many order creation requests",
+};
+
+const ADMIN_LOGIN_POLICY: RateLimitPolicy = RateLimitPolicy {
+    scope: "admin_login",
+    window: ADMIN_LOGIN_LIMIT_WINDOW,
+    max_requests: ADMIN_LOGIN_LIMIT_MAX_REQUESTS,
+    error_message: "too many admin login requests",
+};
 
 #[derive(Debug)]
 struct FixedWindow {
@@ -26,16 +50,26 @@ struct FixedWindow {
     accepted_requests: u32,
 }
 
-/// 创建订单专用的固定窗口限流器。计数表由 DashMap 保证同一 IP 的并发更新原子化，
-/// 克隆中间件状态时仍共享同一份计数，避免并发请求绕过 3 分钟 5 次的限制。
+/// 按客户端 IP 计数的固定窗口限流器。每个业务入口创建独立实例，因此管理员
+/// 登录与创建订单不会相互消耗配额。DashMap 保证同一 IP 的并发计数更新原子化，
+/// 克隆中间件状态时仍共享同一实例的计数表，避免并发请求绕过限制。
 #[derive(Clone, Debug)]
-pub struct OrderCreationRateLimiter {
+pub struct FixedWindowRateLimiter {
     windows: Arc<DashMap<IpAddr, FixedWindow>>,
     trusted_proxy_cidrs: Arc<[IpNet]>,
+    policy: RateLimitPolicy,
 }
 
-impl OrderCreationRateLimiter {
-    pub fn new(trusted_proxy_cidrs: &[IpNet]) -> Self {
+impl FixedWindowRateLimiter {
+    pub fn for_order_creation(trusted_proxy_cidrs: &[IpNet]) -> Self {
+        Self::new(trusted_proxy_cidrs, ORDER_CREATION_POLICY)
+    }
+
+    pub fn for_admin_login(trusted_proxy_cidrs: &[IpNet]) -> Self {
+        Self::new(trusted_proxy_cidrs, ADMIN_LOGIN_POLICY)
+    }
+
+    fn new(trusted_proxy_cidrs: &[IpNet], policy: RateLimitPolicy) -> Self {
         let windows = Arc::new(DashMap::<IpAddr, FixedWindow>::new());
         let cleanup_windows = Arc::clone(&windows);
         tokio::spawn(async move {
@@ -47,25 +81,28 @@ impl OrderCreationRateLimiter {
                 let now = Instant::now();
                 let entries_before = cleanup_windows.len();
                 cleanup_windows.retain(|_, window| {
-                    now.saturating_duration_since(window.started_at) < ORDER_CREATION_LIMIT_WINDOW
+                    now.saturating_duration_since(window.started_at) < policy.window
                 });
                 tracing::debug!(
+                    rate_limit_scope = policy.scope,
                     entries_before,
                     entries_after = cleanup_windows.len(),
-                    "expired order creation rate limit windows cleaned"
+                    "expired fixed-window rate limit entries cleaned"
                 );
             }
         });
 
         tracing::info!(
-            window_seconds = ORDER_CREATION_LIMIT_WINDOW.as_secs(),
-            max_requests = ORDER_CREATION_LIMIT_MAX_REQUESTS,
+            rate_limit_scope = policy.scope,
+            window_seconds = policy.window.as_secs(),
+            max_requests = policy.max_requests,
             trusted_proxy_cidrs = ?trusted_proxy_cidrs,
-            "order creation fixed-window rate limiter initialized"
+            "fixed-window rate limiter initialized"
         );
         Self {
             windows,
             trusted_proxy_cidrs: Arc::from(trusted_proxy_cidrs),
+            policy,
         }
     }
 
@@ -77,15 +114,15 @@ impl OrderCreationRateLimiter {
         });
         let elapsed = now.saturating_duration_since(window.started_at);
 
-        if elapsed >= ORDER_CREATION_LIMIT_WINDOW {
+        if elapsed >= self.policy.window {
             *window = FixedWindow {
                 started_at: now,
                 accepted_requests: 1,
             };
             return Ok(());
         }
-        if window.accepted_requests >= ORDER_CREATION_LIMIT_MAX_REQUESTS {
-            return Err(ORDER_CREATION_LIMIT_WINDOW.saturating_sub(elapsed));
+        if window.accepted_requests >= self.policy.max_requests {
+            return Err(self.policy.window.saturating_sub(elapsed));
         }
 
         window.accepted_requests += 1;
@@ -141,9 +178,9 @@ enum ClientIpError {
     InvalidForwardedFor,
 }
 
-/// 此中间件只挂载到 POST /api/orders。其他接口不会执行这里的 IP 提取或计数逻辑。
-pub async fn enforce_order_creation_limit(
-    State(limiter): State<OrderCreationRateLimiter>,
+/// 此中间件只挂载到明确需要限流的 MethodRouter，不会计数其他 API。
+pub async fn enforce_fixed_window_limit(
+    State(limiter): State<FixedWindowRateLimiter>,
     request: Request,
     next: Next,
 ) -> Response {
@@ -152,8 +189,9 @@ pub async fn enforce_order_creation_limit(
         Err(error) => {
             // IP 无法识别时失败关闭，避免通过畸形代理头绕过限流。
             tracing::error!(
+                rate_limit_scope = limiter.policy.scope,
                 error = ?error,
-                "order creation rate limiter could not determine client IP"
+                "rate limiter could not determine client IP"
             );
             return (
                 StatusCode::INTERNAL_SERVER_ERROR,
@@ -167,14 +205,15 @@ pub async fn enforce_order_creation_limit(
         // Retry-After 使用向上取整的整秒数，避免不足一秒时返回 0 导致客户端立即重试。
         let retry_after_seconds = retry_after.as_secs() + u64::from(retry_after.subsec_nanos() > 0);
         tracing::warn!(
+            rate_limit_scope = limiter.policy.scope,
             %client_ip,
             retry_after_seconds,
-            "order creation rejected by rate limiter"
+            "request rejected by fixed-window rate limiter"
         );
         let mut response = (
             StatusCode::TOO_MANY_REQUESTS,
             Json(json!({
-                "error": "too many order creation requests",
+                "error": limiter.policy.error_message,
                 "retry_after_seconds": retry_after_seconds,
             })),
         )

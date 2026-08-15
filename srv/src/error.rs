@@ -16,8 +16,6 @@ pub enum AppError {
     NotFound(String),
     #[error("{0}")]
     Conflict(String),
-    #[error("{0}")]
-    Upstream(String),
     #[error("database error")]
     Database(#[from] diesel::result::Error),
     #[error("connection pool error")]
@@ -33,7 +31,6 @@ impl IntoResponse for AppError {
             Self::Unauthorized => (StatusCode::UNAUTHORIZED, "unauthorized".to_string()),
             Self::NotFound(message) => (StatusCode::NOT_FOUND, message),
             Self::Conflict(message) => (StatusCode::CONFLICT, message),
-            Self::Upstream(message) => (StatusCode::BAD_GATEWAY, message),
             Self::Database(diesel::result::Error::NotFound) => {
                 (StatusCode::NOT_FOUND, "resource not found".to_string())
             }

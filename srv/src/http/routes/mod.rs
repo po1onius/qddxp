@@ -22,7 +22,10 @@ use crate::{AppState, http::rate_limit};
 
 pub fn router(state: AppState) -> Router {
     let trusted_proxy_cidrs = &state.config.rate_limit_trusted_proxy_cidrs;
-    let order_creation_limiter = rate_limit::OrderCreationRateLimiter::new(trusted_proxy_cidrs);
+    let order_creation_limiter =
+        rate_limit::FixedWindowRateLimiter::for_order_creation(trusted_proxy_cidrs);
+    let admin_login_limiter =
+        rate_limit::FixedWindowRateLimiter::for_admin_login(trusted_proxy_cidrs);
 
     let web_dist_dir = state.config.web_dist_dir.clone();
     let index_file = web_dist_dir.join("index.html");
@@ -47,7 +50,7 @@ pub fn router(state: AppState) -> Router {
             "/orders",
             post(public::create_order).layer(middleware::from_fn_with_state(
                 order_creation_limiter,
-                rate_limit::enforce_order_creation_limit,
+                rate_limit::enforce_fixed_window_limit,
             )),
         )
         .route("/orders/by-contact", post(public::list_orders_by_contact))
@@ -58,14 +61,16 @@ pub fn router(state: AppState) -> Router {
         )
         .route("/payments/wechatpay/notify", post(wechatpay::notify))
         .route(
-            "/orders/{id}/payments/wechatpay/query",
-            post(wechatpay::reconcile_order),
-        )
-        .route(
             "/admin/session",
             get(admin_auth::status)
-                .post(admin_auth::login)
-                .delete(admin_auth::logout),
+                .delete(admin_auth::logout)
+                // 限流只包裹 POST 登录处理器，会话状态查询和退出登录不消耗登录配额。
+                .merge(
+                    post(admin_auth::login).layer(middleware::from_fn_with_state(
+                        admin_login_limiter,
+                        rate_limit::enforce_fixed_window_limit,
+                    )),
+                ),
         )
         .route(
             "/admin/product-info",

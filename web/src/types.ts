@@ -133,11 +133,6 @@ export type ListOrdersByContactInput = {
 
 export type OrderStatus = 'pending' | 'delivered' | 'expired';
 
-export type ReconcilePaymentResult = {
-  status: OrderStatus;
-  trade_state: string;
-};
-
 export type OrderSummary = {
   id: string;
   product_info_id: string;

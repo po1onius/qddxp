@@ -11,7 +11,6 @@ import type {
   ListOrdersByContactInput,
   OffsetPageResponse,
   PaymentMethod,
-  ReconcilePaymentResult,
   StorefrontConfig,
   OrderDetail,
   OrderSummary,
@@ -122,16 +121,6 @@ export function queryOrder(input: QueryOrderInput): Promise<OrderDetail> {
   return request<OrderDetail>('/orders/query', {
     method: 'POST',
     body: JSON.stringify(input),
-  });
-}
-
-export function reconcileWechatPayOrder(
-  orderId: string,
-  orderPassword: string,
-): Promise<ReconcilePaymentResult> {
-  return request<ReconcilePaymentResult>(`/orders/${orderId}/payments/wechatpay/query`, {
-    method: 'POST',
-    body: JSON.stringify({ order_password: orderPassword }),
   });
 }
 

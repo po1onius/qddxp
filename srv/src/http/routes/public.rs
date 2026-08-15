@@ -25,11 +25,16 @@ use crate::{
     http::pagination::{OffsetPageResponse, OffsetPagination, normalize_offset_page},
     notifications,
     payments::EPAY_RESERVATION_MINUTES,
-    security::{hash_order_password, verify_order_password},
+    security::{
+        ORDER_PASSWORD_MAX_LENGTH, ORDER_PASSWORD_MIN_LENGTH, hash_order_password,
+        verify_order_password,
+    },
 };
 
-/// 联系方式会直接写入订单并用于精确查单，限制长度可以避免异常大输入进入日志、数据库和索引。
+/// 联系方式会直接写入订单并用于精确查单：最小长度避免过短、无法识别的内容，
+/// 最大长度避免异常大输入进入日志、数据库和索引。
 /// 使用 Unicode 字符数而不是 UTF-8 字节数，确保中文等多字节字符仍按一个字符计算。
+const CONTACT_MIN_LENGTH: usize = 6;
 const CONTACT_MAX_LENGTH: usize = 50;
 
 #[derive(Debug, Serialize, Queryable)]
@@ -325,6 +330,17 @@ pub async fn create_order(
         );
         return Err(AppError::BadRequest("contact is required".to_string()));
     }
+    if contact_len < CONTACT_MIN_LENGTH {
+        tracing::warn!(
+            product_info_id = %request.product_info_id,
+            contact_len,
+            contact_min_length = CONTACT_MIN_LENGTH,
+            "create order rejected: contact is too short"
+        );
+        return Err(AppError::BadRequest(format!(
+            "contact must be at least {CONTACT_MIN_LENGTH} characters"
+        )));
+    }
     if contact_len > CONTACT_MAX_LENGTH {
         tracing::warn!(
             product_info_id = %request.product_info_id,
@@ -337,15 +353,30 @@ pub async fn create_order(
         )));
     }
 
-    if request.order_password.len() < 6 {
+    let order_password_len = request.order_password.chars().count();
+    if order_password_len < ORDER_PASSWORD_MIN_LENGTH {
         tracing::warn!(
             product_info_id = %request.product_info_id,
             contact_len,
+            order_password_len,
+            order_password_min_length = ORDER_PASSWORD_MIN_LENGTH,
             "create order rejected: password too short"
         );
-        return Err(AppError::BadRequest(
-            "order_password must be at least 6 characters".to_string(),
-        ));
+        return Err(AppError::BadRequest(format!(
+            "order_password must be at least {ORDER_PASSWORD_MIN_LENGTH} characters"
+        )));
+    }
+    if order_password_len > ORDER_PASSWORD_MAX_LENGTH {
+        tracing::warn!(
+            product_info_id = %request.product_info_id,
+            contact_len,
+            order_password_len,
+            order_password_max_length = ORDER_PASSWORD_MAX_LENGTH,
+            "create order rejected: password too long"
+        );
+        return Err(AppError::BadRequest(format!(
+            "order_password must be at most {ORDER_PASSWORD_MAX_LENGTH} characters"
+        )));
     }
 
     let payment_provider = request
@@ -724,6 +755,16 @@ pub async fn list_orders_by_contact(
         tracing::warn!("list orders by contact rejected: missing contact");
         return Err(AppError::BadRequest("contact is required".to_string()));
     }
+    if contact_len < CONTACT_MIN_LENGTH {
+        tracing::warn!(
+            contact_len,
+            contact_min_length = CONTACT_MIN_LENGTH,
+            "list orders by contact rejected: contact is too short"
+        );
+        return Err(AppError::BadRequest(format!(
+            "contact must be at least {CONTACT_MIN_LENGTH} characters"
+        )));
+    }
     if contact_len > CONTACT_MAX_LENGTH {
         tracing::warn!(
             contact_len,
@@ -798,6 +839,30 @@ pub async fn query_order(
         return Err(AppError::BadRequest(
             "order_password is required".to_string(),
         ));
+    }
+
+    let order_password_len = request.order_password.chars().count();
+    if order_password_len < ORDER_PASSWORD_MIN_LENGTH {
+        tracing::warn!(
+            order_id = %request.id,
+            order_password_len,
+            order_password_min_length = ORDER_PASSWORD_MIN_LENGTH,
+            "query order rejected: password too short"
+        );
+        return Err(AppError::BadRequest(format!(
+            "order_password must be at least {ORDER_PASSWORD_MIN_LENGTH} characters"
+        )));
+    }
+    if order_password_len > ORDER_PASSWORD_MAX_LENGTH {
+        tracing::warn!(
+            order_id = %request.id,
+            order_password_len,
+            order_password_max_length = ORDER_PASSWORD_MAX_LENGTH,
+            "query order rejected: password too long"
+        );
+        return Err(AppError::BadRequest(format!(
+            "order_password must be at most {ORDER_PASSWORD_MAX_LENGTH} characters"
+        )));
     }
 
     let order_id = request.id;

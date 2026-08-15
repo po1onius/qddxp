@@ -51,8 +51,8 @@ CREATE TABLE orders (
     expires_at TIMESTAMPTZ NOT NULL,
     status TEXT NOT NULL DEFAULT 'pending'
         CHECK (status IN ('pending', 'delivered', 'expired')),
-    -- PostgreSQL 的 char_length 按字符而非 UTF-8 字节计数，与应用层校验语义一致。
-    contact TEXT NOT NULL CHECK (char_length(contact) <= 50),
+    -- PostgreSQL 的 char_length 按字符而非 UTF-8 字节计数，与应用层 6～50 个字符的校验语义一致。
+    contact TEXT NOT NULL CHECK (char_length(contact) BETWEEN 6 AND 50),
     order_password_hash TEXT NOT NULL,
     CONSTRAINT orders_inventory_state_check CHECK (
         (status IN ('pending', 'delivered') AND product_id IS NOT NULL)
