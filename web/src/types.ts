@@ -60,7 +60,6 @@ export type CreateAdminProductInput = {
 };
 
 export type CreateAdminProductResult = {
-  items: AdminProduct[];
   submitted: number;
   stocked: number;
   duplicates: number;
@@ -78,20 +77,13 @@ export type UpdateAdminProductStatusResult = {
   status: AdminProductStatus | string;
 };
 
-export type AdminProduct = {
-  id: string;
-  product_info_id: string;
-  content: string;
-  status: AdminProductStatus | string;
-  created_at: string;
-};
-
 export type AdminInventoryProduct = {
   id: string;
   product_info_id: string;
   product_name: string;
   price_cents: number;
   product_info_active: boolean;
+  // 完整发货内容不会进入管理后台浏览器，仅用于末尾字符核对。
   content: string;
   status: ProductInventoryStatus | string;
   created_at: string;
@@ -172,6 +164,7 @@ export type AdminOrder = {
   product_id: string | null;
   product_info_id: string;
   product_name: string;
+  // 已分配库存存在时返回脱敏后的发货内容，未分配时仍为 null。
   product_content: string | null;
   created_at: string;
   payment_paid_at: string | null;

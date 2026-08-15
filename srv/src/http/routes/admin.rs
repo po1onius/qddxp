@@ -16,7 +16,7 @@ use uuid::Uuid;
 use crate::{
     AppState,
     db::{
-        models::{ApiCallLog, NewProduct, NewProductInfo, Product, ProductInfo},
+        models::{ApiCallLog, NewProduct, NewProductInfo, ProductInfo},
         schema::{api_call_logs, orders, payment_attempts, product_info, products},
     },
     domain::{OrderStatus, ProductStatus},
@@ -67,7 +67,6 @@ pub struct CreateProductRequest {
 
 #[derive(Debug, Serialize)]
 pub struct CreateProductResponse {
-    pub items: Vec<Product>,
     pub submitted: usize,
     pub stocked: usize,
     pub duplicates: usize,
@@ -125,6 +124,26 @@ pub struct AdminOrderResponse {
     pub payment_state: String,
     pub amount_cents: i64,
     pub currency: String,
+}
+
+/// 管理后台只需要用发货内容末尾四个字符辅助核对库存，不能把完整卡密返回给浏览器。
+///
+/// 这里按 Unicode 字符而不是 UTF-8 字节截取，避免中文、emoji 等多字节内容在字符中间
+/// 被切断。固定使用四个星号表示已经隐藏的前缀，不暴露原始内容的准确长度；不足四个
+/// 字符的内容没有可隐藏的前缀，因此按实际内容返回。
+fn mask_product_content(content: &str) -> String {
+    const VISIBLE_SUFFIX_CHARS: usize = 4;
+
+    let content_length = content.chars().count();
+    if content_length <= VISIBLE_SUFFIX_CHARS {
+        return content.to_string();
+    }
+
+    let visible_suffix = content
+        .chars()
+        .skip(content_length - VISIBLE_SUFFIX_CHARS)
+        .collect::<String>();
+    format!("****{visible_suffix}")
 }
 
 pub async fn create_product_info(
@@ -345,7 +364,9 @@ pub async fn create_product(
     );
 
     let mut conn = state.pool.get().await?;
-    let products = conn
+    // 调用方只关心实际入库数量，不需要取回刚插入的整行数据。`execute` 直接返回受影响
+    // 行数，既避免无用的数据库回传，也确保完整发货内容不会进入 HTTP 响应构造流程。
+    let stocked = conn
         .transaction::<_, AppError, _>(async move |conn| {
             product_info::table
                 .filter(product_info::id.eq(request.product_info_id))
@@ -370,17 +391,15 @@ pub async fn create_product(
                 // 不指定冲突目标，使 PostgreSQL 的卡密摘要唯一索引负责最终裁决。这样两个
                 // 管理请求并发导入相同内容时，最多只有一个请求能够创建该条库存。
                 .on_conflict_do_nothing()
-                .get_results::<Product>(conn)
+                .execute(conn)
                 .await
                 .map_err(Into::into)
         })
         .await?;
-    let stocked = products.len();
     let duplicates = submitted.saturating_sub(stocked);
     tracing::info!(
         product_info_id = %request.product_info_id,
         submitted,
-        created = products.len(),
         stocked,
         duplicates,
         "admin created inventory products"
@@ -389,7 +408,6 @@ pub async fn create_product(
     Ok((
         StatusCode::CREATED,
         Json(CreateProductResponse {
-            items: products,
             submitted,
             stocked,
             duplicates,
@@ -555,17 +573,21 @@ pub async fn list_products(
         query = query.filter(products::status.eq(status));
     }
 
-    let products = query
+    let mut products = query
         .order((products::created_at.desc(), products::id.desc()))
         .limit(page_size)
         .offset(offset)
         .load::<AdminProductResponse>(&mut conn)
         .await?;
+    for product in &mut products {
+        product.content = mask_product_content(&product.content);
+    }
     tracing::info!(
         returned = products.len(),
         page,
         page_size,
         total,
+        content_masked = true,
         "admin listed inventory products"
     );
 
@@ -592,7 +614,7 @@ pub async fn list_orders(
         .first::<i64>(&mut conn)
         .await?;
 
-    let orders = orders::table
+    let mut orders = orders::table
         .inner_join(payment_attempts::table.on(payment_attempts::order_id.eq(orders::id)))
         .left_join(products::table.on(products::id.nullable().eq(orders::product_id)))
         .select((
@@ -618,11 +640,15 @@ pub async fn list_orders(
         .offset(offset)
         .load::<AdminOrderResponse>(&mut conn)
         .await?;
+    for order in &mut orders {
+        order.product_content = order.product_content.as_deref().map(mask_product_content);
+    }
     tracing::info!(
         returned = orders.len(),
         page,
         page_size,
         total,
+        content_masked = true,
         "admin listed orders"
     );
 

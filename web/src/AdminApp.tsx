@@ -1566,7 +1566,6 @@ function StockCreateModal({
       console.info('[库存补货] 批量库存提交成功', {
         productInfoId,
         submitted: createdProducts.submitted,
-        createdCount: createdProducts.items.length,
         stocked: createdProducts.stocked,
         duplicates: createdProducts.duplicates,
       });
