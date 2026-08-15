@@ -83,7 +83,7 @@ export type AdminInventoryProduct = {
   product_name: string;
   price_cents: number;
   product_info_active: boolean;
-  // 完整发货内容不会进入管理后台浏览器，仅用于末尾字符核对。
+  // 完整发货内容不会进入管理后台浏览器，仅用于开头字符核对。
   content: string;
   status: ProductInventoryStatus | string;
   created_at: string;

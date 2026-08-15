@@ -56,6 +56,7 @@ import type {
 const LEGACY_ADMIN_KEY_STORAGE = 'qddxp_admin_key';
 const ADMIN_PAGE_SIZE = 20;
 const PRODUCT_INFO_PAGE_SIZE = 8;
+const MIN_PRODUCT_CONTENT_CHARS = 12;
 
 const inputClass =
   'mt-2 h-10 w-full rounded-md border border-slate-300 bg-white px-3 text-sm outline-none focus:border-slate-950';
@@ -1547,6 +1548,20 @@ function StockCreateModal({
       onError('库存内容不能为空');
       return;
     }
+    // Array.from 按 Unicode 码点计数，与后端 Rust chars() 和 PostgreSQL char_length
+    // 保持一致；String.length 统计 UTF-16 码元，会把部分 emoji 错算成两位。
+    const firstInvalidContentIndex = contents.findIndex(
+      (item) => Array.from(item).length < MIN_PRODUCT_CONTENT_CHARS,
+    );
+    if (firstInvalidContentIndex !== -1) {
+      console.warn('[库存补货] 发货内容长度校验失败', {
+        itemCount: contents.length,
+        firstInvalidItemNumber: firstInvalidContentIndex + 1,
+        minimumContentChars: MIN_PRODUCT_CONTENT_CHARS,
+      });
+      onError(`第 ${firstInvalidContentIndex + 1} 条发货内容少于 ${MIN_PRODUCT_CONTENT_CHARS} 位`);
+      return;
+    }
 
     setSubmitting(true);
     onError(null);
@@ -1614,12 +1629,16 @@ function StockCreateModal({
           <label className="mt-4 block">
             <span className="text-sm font-medium text-slate-700">发货内容</span>
             <textarea
+              aria-describedby="stock-content-help"
               className={textareaClass}
               onChange={(event) => setContent(event.target.value)}
-              placeholder="输入多条发货内容"
+              placeholder={`输入多条发货内容，每条至少 ${MIN_PRODUCT_CONTENT_CHARS} 位`}
               value={content}
             />
           </label>
+          <p className="mt-2 text-xs text-slate-500" id="stock-content-help">
+            每条发货内容清理首尾空白后不得少于 {MIN_PRODUCT_CONTENT_CHARS} 位。
+          </p>
           <label className="mt-4 block">
             <span className="text-sm font-medium text-slate-700">自定义分隔符</span>
             <input

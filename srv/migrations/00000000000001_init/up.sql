@@ -20,10 +20,13 @@ CREATE TABLE product_info (
 CREATE TABLE products (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     product_info_id UUID NOT NULL,
+    -- 发货内容必须具备足够长度，避免管理后台展示前四位后剩余有效内容过短。
+    -- char_length 按字符而非 UTF-8 字节计数，与 Rust 和前端的校验语义一致。
     content TEXT NOT NULL,
     status TEXT NOT NULL DEFAULT 'available'
         CHECK (status IN ('available', 'reserved', 'delivered', 'disabled')),
-    created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    CONSTRAINT products_content_min_length_check CHECK (char_length(content) >= 12)
 );
 
 CREATE INDEX products_info_status_idx ON products(product_info_id, status);

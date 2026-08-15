@@ -25,6 +25,15 @@ use crate::{
     security::is_admin_session,
 };
 
+/// 每条发货内容清理首尾空白后必须保留的最少 Unicode 字符数。
+///
+/// 应用层使用该常量返回清晰的业务错误，数据库迁移中的同值 CHECK 约束则负责阻止
+/// 绕过 HTTP 接口的无效写入。两层都按字符而不是 UTF-8 字节计算长度。
+const MIN_PRODUCT_CONTENT_CHARS: usize = 12;
+
+/// 管理后台核对库存时允许看到的发货内容前缀字符数。
+const VISIBLE_PRODUCT_CONTENT_PREFIX_CHARS: usize = 4;
+
 #[derive(Debug, Deserialize)]
 pub struct CreateProductInfoRequest {
     pub image_base64: Option<String>,
@@ -126,24 +135,16 @@ pub struct AdminOrderResponse {
     pub currency: String,
 }
 
-/// 管理后台只需要用发货内容末尾四个字符辅助核对库存，不能把完整卡密返回给浏览器。
+/// 管理后台只需要用发货内容开头四个字符辅助核对库存，不能把完整卡密返回给浏览器。
 ///
 /// 这里按 Unicode 字符而不是 UTF-8 字节截取，避免中文、emoji 等多字节内容在字符中间
-/// 被切断。固定使用四个星号表示已经隐藏的前缀，不暴露原始内容的准确长度；不足四个
-/// 字符的内容没有可隐藏的前缀，因此按实际内容返回。
+/// 被切断。固定使用四个星号表示已经隐藏的剩余部分，不暴露原始内容的准确长度。
 fn mask_product_content(content: &str) -> String {
-    const VISIBLE_SUFFIX_CHARS: usize = 4;
-
-    let content_length = content.chars().count();
-    if content_length <= VISIBLE_SUFFIX_CHARS {
-        return content.to_string();
-    }
-
-    let visible_suffix = content
+    let visible_prefix = content
         .chars()
-        .skip(content_length - VISIBLE_SUFFIX_CHARS)
+        .take(VISIBLE_PRODUCT_CONTENT_PREFIX_CHARS)
         .collect::<String>();
-    format!("****{visible_suffix}")
+    format!("{visible_prefix}****")
 }
 
 pub async fn create_product_info(
@@ -756,6 +757,28 @@ fn product_contents(request: &CreateProductRequest) -> Result<Vec<String>, AppEr
             "inventory content validation failed: no normalized content"
         );
         return Err(AppError::BadRequest("contents is required".to_string()));
+    }
+
+    // 在整批写库前一次性拒绝所有过短内容，避免同一请求只导入部分库存。日志仅记录
+    // 数量和长度，不记录卡密原文，既便于定位输入问题，也不会把敏感发货内容写入日志。
+    let invalid_content_lengths = contents
+        .iter()
+        .map(|content| content.chars().count())
+        .filter(|length| *length < MIN_PRODUCT_CONTENT_CHARS)
+        .collect::<Vec<_>>();
+    if !invalid_content_lengths.is_empty() {
+        let shortest_content_chars = invalid_content_lengths.iter().copied().min().unwrap_or(0);
+        tracing::warn!(
+            product_info_id = %request.product_info_id,
+            normalized_items = contents.len(),
+            invalid_items = invalid_content_lengths.len(),
+            shortest_content_chars,
+            minimum_content_chars = MIN_PRODUCT_CONTENT_CHARS,
+            "inventory content validation failed: content too short"
+        );
+        return Err(AppError::BadRequest(format!(
+            "每条发货内容不得少于 {MIN_PRODUCT_CONTENT_CHARS} 位"
+        )));
     }
 
     Ok(contents)
