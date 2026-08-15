@@ -290,7 +290,7 @@ Moka 存储，因此不需要额外部署 Redis 或新增数据库表；应用�
 公钥模式验签，不接受未验签的下单应答、查单应答或支付通知。
 
 1. 将 `apiclient_key.pem` 和微信支付公钥放入 `deploy/secrets/`，文件不要提交到 Git；
-   并确保容器内的非 root 用户对文件具有读权限。
+   并确保 rootless Podman 启动用户对文件具有读权限。
 2. 在 `deploy/.env` 中完整填写五项业务凭据，将两个 `WXPAY_*_FILE` 分别指向上述
    宿主机文件，并把 `PUBLIC_BASE_URL` 改为
    可由微信服务器访问的 HTTPS 域名。

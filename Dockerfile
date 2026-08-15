@@ -28,11 +28,12 @@ RUN npm run build
 
 FROM debian:bookworm-slim AS qddxp
 
+# 生产环境使用 rootless Podman：容器内 root 映射为启动 Podman 的宿主机普通用户，
+# 不再额外创建容器用户，避免 bind mount 日志目录产生不必要的 UID 映射和写入权限问题。
 RUN apt-get update \
     && apt-get install -y --no-install-recommends ca-certificates libpq5 \
     && rm -rf /var/lib/apt/lists/* \
-    && useradd --system --uid 10001 --create-home app \
-    && install -d -o app -g app /run/assets/qddxp /run/secrets/qddxp /var/log/qddxp
+    && install -d /run/assets/qddxp /run/secrets/qddxp /var/log/qddxp
 
 COPY --from=srv-builder /app/srv/target/release/qddxp-srv /usr/local/bin/qddxp-srv
 COPY --from=web-builder /app/web/dist /usr/local/share/qddxp/web
@@ -45,7 +46,6 @@ ENV WEB_DIST_DIR=/usr/local/share/qddxp/web \
     WXPAY_MERCHANT_PRIVATE_KEY_FILE=/run/secrets/qddxp/wechatpay_merchant_private_key.pem \
     WXPAY_PUBLIC_KEY_FILE=/run/secrets/qddxp/wechatpay_public_key.pem
 
-USER app
 EXPOSE 3000
 
 CMD ["qddxp-srv"]
