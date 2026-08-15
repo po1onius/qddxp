@@ -19,6 +19,7 @@ import type {
   QueryOrderInput,
   UpdateAdminProductStatusResult,
   UpdateAdminProductStatusInput,
+  UpdateProductInfoInput,
   UpdateProductInfoActiveInput,
 } from '../types';
 
@@ -183,6 +184,16 @@ export function createProductInfo(input: CreateProductInfoInput): Promise<AdminP
 
 export function listAdminProductInfo(): Promise<AdminProductInfo[]> {
   return adminRequest<AdminProductInfo[]>('/admin/product-info');
+}
+
+export function updateProductInfo(
+  productInfoId: string,
+  input: UpdateProductInfoInput,
+): Promise<AdminProductInfo> {
+  return adminRequest<AdminProductInfo>(`/admin/product-info/${productInfoId}`, {
+    method: 'PATCH',
+    body: JSON.stringify(input),
+  });
 }
 
 export function updateProductInfoActive(

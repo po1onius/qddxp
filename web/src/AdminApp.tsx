@@ -11,6 +11,7 @@ import {
   Loader2,
   LogOut,
   PackagePlus,
+  Pencil,
   Power,
   PowerOff,
   Plus,
@@ -36,6 +37,7 @@ import {
   loginAdmin,
   logoutAdmin,
   updateAdminProductStatuses,
+  updateProductInfo,
   updateProductInfoActive,
 } from './api/client';
 import type {
@@ -494,6 +496,11 @@ function AdminDashboard({
               void refreshProducts();
             }}
             onError={showError}
+            onUpdated={(info) => {
+              upsertProductInfo(info);
+              showToast({ message: `已更新商品信息：${info.name}`, type: 'success' });
+              void refreshProducts();
+            }}
             onStatusChanged={(info) => {
               upsertProductInfo(info);
               showToast({ message: `已${info.active ? '上架' : '下架'}商品信息：${info.name}`, type: 'success' });
@@ -735,15 +742,18 @@ function ProductInfoCatalogPanel({
   onCreated,
   onError,
   onStatusChanged,
+  onUpdated,
   productOptions,
 }: {
   loading: boolean;
   onCreated: (info: AdminProductInfo) => void;
   onError: (message: string | null) => void;
   onStatusChanged: (info: AdminProductInfo) => void;
+  onUpdated: (info: AdminProductInfo) => void;
   productOptions: ProductOption[];
 }) {
   const [showCreateModal, setShowCreateModal] = useState(false);
+  const [editingProduct, setEditingProduct] = useState<ProductOption | null>(null);
   const [showAllProductInfos, setShowAllProductInfos] = useState(false);
   const [updatingProductInfoId, setUpdatingProductInfoId] = useState<string | null>(null);
   const [page, setPage] = useState(1);
@@ -819,6 +829,7 @@ function ProductInfoCatalogPanel({
         {visibleProductOptions.map((product) => (
           <ProductInfoCard
             key={product.id}
+            onEdit={() => setEditingProduct(product)}
             onToggleActive={() => void toggleProductActive(product)}
             product={product}
             updating={updatingProductInfoId === product.id}
@@ -835,11 +846,20 @@ function ProductInfoCatalogPanel({
       {showCreateModal && (
         <ProductInfoModal
           onClose={() => setShowCreateModal(false)}
-          onCreated={(info) => {
+          onSaved={(info) => {
             setPage(1);
             onCreated(info);
           }}
           onError={onError}
+        />
+      )}
+
+      {editingProduct && (
+        <ProductInfoModal
+          onClose={() => setEditingProduct(null)}
+          onError={onError}
+          onSaved={onUpdated}
+          product={editingProduct}
         />
       )}
     </section>
@@ -847,10 +867,12 @@ function ProductInfoCatalogPanel({
 }
 
 function ProductInfoCard({
+  onEdit,
   onToggleActive,
   product,
   updating,
 }: {
+  onEdit: () => void;
   onToggleActive: () => void;
   product: ProductOption;
   updating: boolean;
@@ -860,11 +882,19 @@ function ProductInfoCard({
 
   return (
     <article
-      className={`relative overflow-hidden rounded-md border bg-white text-left shadow-panel ${
+      className={`relative overflow-hidden rounded-md border bg-white text-left shadow-panel hover:border-slate-500 ${
         product.active ? 'border-slate-200' : 'border-slate-300'
       }`}
       data-active={product.active}
     >
+      {/* 用覆盖卡片的独立按钮承接编辑操作，并把上下架按钮提升到更高层级。这样整张
+          卡片都可点击，同时不会产生 button 嵌套，也保留完整的键盘焦点行为。 */}
+      <button
+        aria-label={`编辑商品信息 ${product.name}`}
+        className="absolute inset-0 z-10 cursor-pointer rounded-md outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-slate-950"
+        onClick={onEdit}
+        type="button"
+      />
       <div className={product.active ? undefined : 'grayscale opacity-70'}>
         <div className="flex h-48 items-center justify-center bg-slate-100">
           {imageSrc ? (
@@ -885,10 +915,16 @@ function ProductInfoCard({
             <p className="shrink-0 text-base font-semibold text-emerald-700">{formatPrice(product.price_cents)}</p>
           </div>
           <div className="flex items-center justify-between gap-3">
-            <StatusPill active={product.active} />
+            <div className="flex items-center gap-2">
+              <StatusPill active={product.active} />
+              <span className="inline-flex items-center gap-1 text-xs text-slate-500">
+                <Pencil size={14} />
+                点击编辑
+              </span>
+            </div>
             <button
               aria-label={`${actionText}商品信息 ${product.name}`}
-              className="inline-flex h-9 items-center justify-center gap-2 rounded-md border border-slate-300 bg-white px-3 text-sm font-medium text-slate-700 hover:border-slate-500 disabled:cursor-wait disabled:opacity-60"
+              className="relative z-20 inline-flex h-9 items-center justify-center gap-2 rounded-md border border-slate-300 bg-white px-3 text-sm font-medium text-slate-700 hover:border-slate-500 disabled:cursor-wait disabled:opacity-60"
               disabled={updating}
               onClick={onToggleActive}
               type="button"
@@ -906,14 +942,29 @@ function ProductInfoCard({
 
 function ProductInfoModal({
   onClose,
-  onCreated,
   onError,
+  onSaved,
+  product,
 }: {
   onClose: () => void;
-  onCreated: (info: AdminProductInfo) => void;
   onError: (message: string | null) => void;
+  onSaved: (info: AdminProductInfo) => void;
+  product?: ProductOption;
 }) {
-  const [form, setForm] = useState(emptyProductInfoForm);
+  const editing = product !== undefined;
+  const [form, setForm] = useState<ProductInfoFormState>(() =>
+    product
+      ? {
+          name: product.name,
+          details: product.details,
+          priceYuan: (product.price_cents / 100).toFixed(2),
+          active: product.active,
+          imageBase64: product.image_base64 ?? '',
+          imageFile: null,
+          imagePreviewUrl: '',
+        }
+      : emptyProductInfoForm,
+  );
   const [submitting, setSubmitting] = useState(false);
 
   async function submit(event: FormEvent<HTMLFormElement>) {
@@ -927,12 +978,29 @@ function ProductInfoModal({
     onError(null);
 
     try {
-      const info = await createProductInfo(payload);
-      onCreated(info);
+      // 上下架由商品卡片上的独立按钮负责；编辑仅提交展示字段，防止管理员在修改
+      // 文案或价格时无意改变商品销售状态。
+      const info = editing
+        ? await updateProductInfo(product.id, {
+            image_base64: payload.image_base64,
+            name: payload.name,
+            details: payload.details,
+            price_cents: payload.price_cents,
+          })
+        : await createProductInfo(payload);
+      console.info(editing ? '[商品信息] 编辑成功' : '[商品信息] 创建成功', {
+        productInfoId: info.id,
+        priceCents: info.price_cents,
+      });
+      onSaved(info);
       revokePreviewUrl(form);
       onClose();
     } catch (err) {
-      onError(err instanceof Error ? err.message : '创建商品信息失败');
+      console.error(editing ? '[商品信息] 编辑失败' : '[商品信息] 创建失败', {
+        productInfoId: product?.id,
+        error: err,
+      });
+      onError(err instanceof Error ? err.message : editing ? '更新商品信息失败' : '创建商品信息失败');
     } finally {
       setSubmitting(false);
     }
@@ -943,8 +1011,10 @@ function ProductInfoModal({
       <section className="max-h-[calc(100vh-2rem)] w-full max-w-3xl overflow-hidden rounded-md bg-white shadow-panel">
         <div className="flex items-start justify-between gap-4 border-b border-slate-200 px-5 py-4">
           <div>
-            <h2 className="text-lg font-semibold">新增商品信息</h2>
-            <p className="mt-1 text-sm text-slate-500">填写商品基础信息和展示内容</p>
+            <h2 className="text-lg font-semibold">{editing ? '编辑商品信息' : '新增商品信息'}</h2>
+            <p className="mt-1 text-sm text-slate-500">
+              {editing ? '修改后的信息会用于商城展示和后续新订单' : '填写商品基础信息和展示内容'}
+            </p>
           </div>
           <button
             aria-label="关闭商品信息弹窗"
@@ -957,7 +1027,7 @@ function ProductInfoModal({
         </div>
 
         <form className="max-h-[calc(100vh-8rem)] overflow-auto p-5" noValidate onSubmit={submit}>
-          <ProductInfoFields form={form} onChange={setForm} />
+          <ProductInfoFields form={form} onChange={setForm} showActive={!editing} />
           <div className="mt-5 flex justify-end gap-3 border-t border-slate-200 pt-4">
             <button
               className="h-10 rounded-md border border-slate-300 bg-white px-4 text-sm font-medium text-slate-700 hover:border-slate-500"
@@ -972,7 +1042,7 @@ function ProductInfoModal({
               type="submit"
             >
               {submitting ? <Loader2 className="animate-spin" size={18} /> : <Save size={18} />}
-              创建
+              {editing ? '保存' : '创建'}
             </button>
           </div>
         </form>
@@ -984,9 +1054,11 @@ function ProductInfoModal({
 function ProductInfoFields({
   form,
   onChange,
+  showActive,
 }: {
   form: ProductInfoFormState;
   onChange: (form: ProductInfoFormState) => void;
+  showActive: boolean;
 }) {
   const imageInputRef = useRef<HTMLInputElement>(null);
   const previewSrc = form.imagePreviewUrl || (form.imageBase64.trim() ? imageBase64Src(form.imageBase64.trim()) : null);
@@ -1042,15 +1114,17 @@ function ProductInfoFields({
           value={form.priceYuan}
         />
       </label>
-      <label className="mt-4 flex items-center gap-2 text-sm font-medium text-slate-700">
-        <input
-          checked={form.active}
-          className="h-4 w-4 rounded border-slate-300"
-          onChange={(event) => onChange({ ...form, active: event.target.checked })}
-          type="checkbox"
-        />
-        上架
-      </label>
+      {showActive && (
+        <label className="mt-4 flex items-center gap-2 text-sm font-medium text-slate-700">
+          <input
+            checked={form.active}
+            className="h-4 w-4 rounded border-slate-300"
+            onChange={(event) => onChange({ ...form, active: event.target.checked })}
+            type="checkbox"
+          />
+          上架
+        </label>
+      )}
       <div className="mt-4">
         <span className="text-sm font-medium text-slate-700">商品图</span>
         <div className="mt-2 flex flex-col gap-2 sm:flex-row sm:items-center">

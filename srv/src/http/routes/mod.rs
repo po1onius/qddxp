@@ -76,6 +76,10 @@ pub fn router(state: AppState) -> Router {
             patch(admin::update_product_info_active),
         )
         .route(
+            "/admin/product-info/{id}",
+            patch(admin::update_product_info),
+        )
+        .route(
             "/admin/products",
             get(admin::list_products).post(admin::create_product),
         )

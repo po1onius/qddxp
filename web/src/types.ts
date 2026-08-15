@@ -39,6 +39,13 @@ export type CreateProductInfoInput = {
   active: boolean;
 };
 
+export type UpdateProductInfoInput = {
+  image_base64: string | null;
+  name: string;
+  details: string;
+  price_cents: number;
+};
+
 export type UpdateProductInfoActiveInput = {
   active: boolean;
 };

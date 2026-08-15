@@ -6,6 +6,7 @@ use axum::{
     http::StatusCode,
 };
 use chrono::{DateTime, Utc};
+use diesel::result::{DatabaseErrorKind, Error as DieselError};
 use diesel::{dsl::count_star, prelude::*};
 use diesel_async::{AsyncConnection, RunQueryDsl};
 use serde::{Deserialize, Serialize};
@@ -31,6 +32,14 @@ pub struct CreateProductInfoRequest {
     pub details: Option<String>,
     pub price_cents: i64,
     pub active: Option<bool>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct UpdateProductInfoRequest {
+    pub image_base64: Option<String>,
+    pub name: String,
+    pub details: Option<String>,
+    pub price_cents: i64,
 }
 
 #[derive(Debug, Serialize)]
@@ -149,7 +158,8 @@ pub async fn create_product_info(
             active,
         })
         .get_result::<ProductInfo>(&mut conn)
-        .await?;
+        .await
+        .map_err(map_product_info_write_error)?;
     tracing::info!(
         product_info_id = %product_info.id,
         price_cents = product_info.price_cents,
@@ -187,6 +197,57 @@ pub async fn list_product_info(
     tracing::info!(returned = infos.len(), "admin listed product info");
 
     Ok(Json(infos))
+}
+
+/// 更新商品面向顾客展示的基础信息。
+///
+/// 名称、图片、详情和价格必须在同一条 SQL 中原子更新。下单事务会锁定同一条
+/// `product_info` 记录，因此并发下单只能读取编辑前或编辑后的完整版本，并把当时的
+/// 名称与价格保存为订单快照；已经创建的订单及其支付金额不会被本次编辑改变。
+pub async fn update_product_info(
+    State(state): State<AppState>,
+    session: Session,
+    Path(id): Path<Uuid>,
+    Json(request): Json<UpdateProductInfoRequest>,
+) -> Result<Json<ProductInfoResponse>, AppError> {
+    require_admin_for(&session, "update_product_info").await?;
+    validate_product_info(&request.name, request.price_cents)?;
+
+    let name = request.name.trim();
+    let details = request
+        .details
+        .as_deref()
+        .map(str::trim)
+        .unwrap_or_default();
+    tracing::info!(
+        product_info_id = %id,
+        name_len = name.chars().count(),
+        details_len = details.chars().count(),
+        price_cents = request.price_cents,
+        has_image = request.image_base64.is_some(),
+        "admin updating product info"
+    );
+
+    let mut conn = state.pool.get().await?;
+    let product_info = diesel::update(product_info::table.filter(product_info::id.eq(id)))
+        .set((
+            product_info::image_base64.eq(request.image_base64.as_deref()),
+            product_info::name.eq(name),
+            product_info::details.eq(details),
+            product_info::price_cents.eq(request.price_cents),
+        ))
+        .get_result::<ProductInfo>(&mut conn)
+        .await
+        .map_err(map_product_info_write_error)?;
+    tracing::info!(
+        product_info_id = %product_info.id,
+        price_cents = product_info.price_cents,
+        active = product_info.active,
+        "admin updated product info"
+    );
+
+    let sold_count = delivered_order_count(&mut conn, product_info.id).await?;
+    Ok(Json(product_info_response(product_info, sold_count)))
 }
 
 pub async fn update_product_info_active(
@@ -632,6 +693,24 @@ fn validate_product_info(name: &str, price_cents: i64) -> Result<(), AppError> {
         ));
     }
     Ok(())
+}
+
+/// 将商品名称唯一约束冲突转换为管理员可以直接理解的业务错误。
+///
+/// 唯一性必须由数据库约束保证，不能用“先查询再写入”替代，否则两个并发请求仍可能
+/// 同时通过查询。其他数据库错误继续交给统一错误处理，避免掩盖真实故障。
+fn map_product_info_write_error(error: DieselError) -> AppError {
+    if let DieselError::DatabaseError(DatabaseErrorKind::UniqueViolation, information) = &error
+        && information.constraint_name() == Some("product_info_name_unique")
+    {
+        tracing::warn!(
+            constraint = "product_info_name_unique",
+            "product info write rejected: duplicate name"
+        );
+        return AppError::Conflict("商品名称已存在".to_string());
+    }
+
+    AppError::Database(error)
 }
 
 fn product_contents(request: &CreateProductRequest) -> Result<Vec<String>, AppError> {

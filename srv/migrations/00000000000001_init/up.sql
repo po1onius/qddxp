@@ -10,7 +10,10 @@ CREATE TABLE product_info (
     details TEXT NOT NULL DEFAULT '',
     price_cents BIGINT NOT NULL CHECK (price_cents >= 0),
     active BOOLEAN NOT NULL DEFAULT TRUE,
-    created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    -- 商品名称在创建和编辑接口中都会先清理首尾空白。数据库唯一约束负责覆盖
+    -- 普通请求与并发写入，并保留 PostgreSQL TEXT 默认的精确、区分大小写比较语义。
+    CONSTRAINT product_info_name_unique UNIQUE (name)
 );
 
 -- product_info_id 不使用外键，删除商品定义等管理操作必须由应用层检查库存和订单引用。
