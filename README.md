@@ -91,6 +91,22 @@ docker compose -f deploy/compose.yml up -d --build
 数据库同时将 5432 映射到宿主机回环地址（`POSTGRES_PORT` 可覆盖），便于宿主机上的
 排查与备份工具直连，也供本地开发（`make`）使用。
 
+### 应用日志
+
+应用日志会同时输出到容器控制台和日志文件。文件按 UTC 日期每日滚动，命名格式为
+`qddxp.YYYY-MM-DD.log`，并保存在 `qddxp_logs` Compose 命名卷的
+`/var/log/qddxp` 目录中；正常重建容器不会删除该卷。查看当前文件或持续跟踪当天日志：
+
+```bash
+docker compose -f deploy/compose.yml exec qddxp ls -lh /var/log/qddxp
+docker compose -f deploy/compose.yml exec qddxp \
+  tail -f /var/log/qddxp/qddxp.$(date -u +%F).log
+```
+
+当前不会自动删除历史应用日志，生产环境应根据磁盘容量制定保留和归档策略。执行
+`docker compose down -v` 会连同数据库、备份仓库和日志命名卷一起删除，不应在生产
+环境使用。
+
 ### PostgreSQL 备份
 
 Compose 使用同时包含 PostgreSQL 18.4 和 pgBackRest 的 Percona 发行镜像。正常执行
@@ -235,6 +251,7 @@ docker compose -f deploy/compose.yml up -d pgbackrest-backup qddxp
 | `WXPAY_API_V3_KEY` | 否 | 32 字节 APIv3 密钥，仅用于回调资源解密 |
 | `WXPAY_PUBLIC_KEY_ID` / `WXPAY_PUBLIC_KEY_FILE` | 否 | 微信支付公钥 ID 与 PEM 文件，用于应答和回调验签；Docker 部署时文件参数填写宿主机路径 |
 | `RUST_LOG` | 否 | 日志级别，默认 `info` |
+| `LOG_DIR` | 否 | 应用日志目录；本地默认 `./logs`，容器内固定为 `/var/log/qddxp` |
 
 启用微信支付时，五项业务凭据与两个 PEM 文件必须同时提供，否则应用会拒绝启动。
 生产环境的 `PUBLIC_BASE_URL` 必须使用公网 HTTPS；回调地址固定生成为

@@ -3,6 +3,7 @@ mod db;
 mod domain;
 mod error;
 mod http;
+mod logging;
 mod notifications;
 mod payments;
 mod security;
@@ -19,7 +20,6 @@ use tokio::net::TcpListener;
 use tower_http::cors::{Any, CorsLayer};
 use tower_sessions::{Expiry, SessionManagerLayer, cookie::SameSite};
 use tower_sessions_moka_store::MokaStore;
-use tracing_subscriber::EnvFilter;
 
 const ADMIN_SESSION_IDLE_MINUTES: i64 = 30;
 const ADMIN_SESSION_MAX_CAPACITY: u64 = 10_000;
@@ -35,11 +35,8 @@ pub struct AppState {
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     dotenvy::dotenv().ok();
-    tracing_subscriber::fmt()
-        .with_env_filter(
-            EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info")),
-        )
-        .init();
+    // 守卫必须保留到 main 退出，才能持续运行文件写入线程并在退出时刷新剩余日志。
+    let _logging_guard = logging::init()?;
 
     let config = Arc::new(AppConfig::from_env()?);
     tracing::info!(
