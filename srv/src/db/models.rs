@@ -92,6 +92,7 @@ pub struct Order {
     pub expires_at: DateTime<Utc>,
     pub status: String,
     pub contact: String,
+    pub remark: String,
     pub order_password_hash: String,
 }
 

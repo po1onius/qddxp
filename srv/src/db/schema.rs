@@ -32,6 +32,7 @@ diesel::table! {
         expires_at -> Timestamptz,
         status -> Text,
         contact -> Text,
+        remark -> Text,
         order_password_hash -> Text,
     }
 }

@@ -93,6 +93,10 @@ pub fn router(state: AppState) -> Router {
             patch(admin::update_product_status),
         )
         .route("/admin/orders", get(admin::list_orders))
+        .route(
+            "/admin/orders/{id}/remark",
+            patch(admin::update_order_remark),
+        )
         .route("/admin/api-call-logs", get(admin::list_api_call_logs))
         .fallback(api_not_found)
         .layer(

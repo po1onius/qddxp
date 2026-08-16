@@ -20,6 +20,8 @@ import type {
   UpdateAdminProductStatusInput,
   UpdateProductInfoInput,
   UpdateProductInfoActiveInput,
+  UpdateOrderRemarkInput,
+  UpdateOrderRemarkResult,
 } from '../types';
 
 const DEFAULT_API_BASE_URL = '/api';
@@ -226,6 +228,16 @@ export function listAdminProducts(
 
 export function listAdminOrders(params: ProductPageParams = {}): Promise<OffsetPageResponse<AdminOrder>> {
   return adminRequest<OffsetPageResponse<AdminOrder>>(withQuery('/admin/orders', params));
+}
+
+export function updateAdminOrderRemark(
+  orderId: string,
+  input: UpdateOrderRemarkInput,
+): Promise<UpdateOrderRemarkResult> {
+  return adminRequest<UpdateOrderRemarkResult>(`/admin/orders/${encodeURIComponent(orderId)}/remark`, {
+    method: 'PATCH',
+    body: JSON.stringify(input),
+  });
 }
 
 export function listAdminApiCallLogs(

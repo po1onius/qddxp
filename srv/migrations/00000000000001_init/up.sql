@@ -53,6 +53,9 @@ CREATE TABLE orders (
         CHECK (status IN ('pending', 'delivered', 'expired')),
     -- PostgreSQL 的 char_length 按字符而非 UTF-8 字节计数，与应用层 6～50 个字符的校验语义一致。
     contact TEXT NOT NULL CHECK (char_length(contact) BETWEEN 6 AND 50),
+    -- 备注仅供管理员内部查看和修改。使用空字符串表达“暂无备注”，避免每个查询和
+    -- 前端编辑器都额外处理 NULL；长度约束阻止异常大的管理请求进入数据库。
+    remark TEXT NOT NULL DEFAULT '' CHECK (char_length(remark) <= 1000),
     order_password_hash TEXT NOT NULL,
     CONSTRAINT orders_inventory_state_check CHECK (
         (status IN ('pending', 'delivered') AND product_id IS NOT NULL)

@@ -34,6 +34,12 @@ const MIN_PRODUCT_CONTENT_CHARS: usize = 12;
 /// 管理后台核对库存时允许看到的发货内容前缀字符数。
 const VISIBLE_PRODUCT_CONTENT_PREFIX_CHARS: usize = 4;
 
+/// 管理员订单备注允许保存的最大 Unicode 字符数。
+///
+/// 应用层校验用于返回明确错误，首个 migration 中的 CHECK 约束是最终数据边界；两者
+/// 都使用字符数而非 UTF-8 字节数，保证中文、emoji 等内容的计数符合管理员直觉。
+const MAX_ORDER_REMARK_CHARS: usize = 1000;
+
 #[derive(Debug, Deserialize)]
 pub struct CreateProductInfoRequest {
     pub image_base64: Option<String>,
@@ -126,6 +132,7 @@ pub struct AdminOrderResponse {
     pub payment_paid_at: Option<DateTime<Utc>>,
     pub status: String,
     pub contact: String,
+    pub remark: String,
     pub payment_provider: String,
     pub payment_channel: String,
     pub merchant_trade_no: String,
@@ -133,6 +140,17 @@ pub struct AdminOrderResponse {
     pub payment_state: String,
     pub amount_cents: i64,
     pub currency: String,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct UpdateOrderRemarkRequest {
+    pub remark: String,
+}
+
+#[derive(Debug, Serialize, Queryable)]
+pub struct UpdateOrderRemarkResponse {
+    pub id: Uuid,
+    pub remark: String,
 }
 
 /// 管理后台只需要用发货内容开头四个字符辅助核对库存，不能把完整卡密返回给浏览器。
@@ -628,6 +646,7 @@ pub async fn list_orders(
             payment_attempts::paid_at,
             orders::status,
             orders::contact,
+            orders::remark,
             payment_attempts::provider,
             payment_attempts::channel,
             payment_attempts::merchant_trade_no,
@@ -659,6 +678,56 @@ pub async fn list_orders(
         page_size,
         total,
     }))
+}
+
+/// 修改单张订单的管理员内部备注。
+///
+/// 备注不会出现在任何顾客端响应中。写入前统一清理首尾空白，同时保留正文内部的换行，
+/// 方便管理员记录多行处理信息；日志刻意不包含正文，避免把联系方式等内部信息复制到日志。
+pub async fn update_order_remark(
+    State(state): State<AppState>,
+    session: Session,
+    Path(id): Path<Uuid>,
+    Json(request): Json<UpdateOrderRemarkRequest>,
+) -> Result<Json<UpdateOrderRemarkResponse>, AppError> {
+    require_admin_for(&session, "update_order_remark").await?;
+
+    let remark = request.remark.trim();
+    let remark_chars = remark.chars().count();
+    if remark_chars > MAX_ORDER_REMARK_CHARS {
+        tracing::warn!(
+            order_id = %id,
+            remark_chars,
+            max_remark_chars = MAX_ORDER_REMARK_CHARS,
+            "admin order remark update rejected: remark too long"
+        );
+        return Err(AppError::BadRequest(format!(
+            "备注不能超过 {MAX_ORDER_REMARK_CHARS} 个字符"
+        )));
+    }
+
+    tracing::info!(
+        order_id = %id,
+        remark_chars,
+        remark_empty = remark.is_empty(),
+        "admin updating order remark"
+    );
+    let mut conn = state.pool.get().await?;
+    let updated = diesel::update(orders::table.filter(orders::id.eq(id)))
+        .set(orders::remark.eq(remark))
+        .returning((orders::id, orders::remark))
+        .get_result::<UpdateOrderRemarkResponse>(&mut conn)
+        .await
+        .optional()?
+        .ok_or_else(|| AppError::NotFound("order not found".to_string()))?;
+
+    tracing::info!(
+        order_id = %updated.id,
+        remark_chars = updated.remark.chars().count(),
+        remark_empty = updated.remark.is_empty(),
+        "admin updated order remark"
+    );
+    Ok(Json(updated))
 }
 
 pub async fn list_api_call_logs(

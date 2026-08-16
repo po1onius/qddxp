@@ -165,6 +165,8 @@ export type AdminOrder = {
   payment_paid_at: string | null;
   status: OrderStatus | string;
   contact: string;
+  // 管理员内部备注；顾客端订单类型不会包含该字段。
+  remark: string;
   payment_provider: string;
   payment_channel: string;
   merchant_trade_no: string;
@@ -172,6 +174,15 @@ export type AdminOrder = {
   payment_state: string;
   amount_cents: number;
   currency: string;
+};
+
+export type UpdateOrderRemarkInput = {
+  remark: string;
+};
+
+export type UpdateOrderRemarkResult = {
+  id: string;
+  remark: string;
 };
 
 export type AdminApiCallLog = {

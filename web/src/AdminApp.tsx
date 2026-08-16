@@ -37,6 +37,7 @@ import {
   loginAdmin,
   logoutAdmin,
   updateAdminProductStatuses,
+  updateAdminOrderRemark,
   updateProductInfo,
   updateProductInfoActive,
 } from './api/client';
@@ -57,6 +58,7 @@ const LEGACY_ADMIN_KEY_STORAGE = 'qddxp_admin_key';
 const ADMIN_PAGE_SIZE = 20;
 const PRODUCT_INFO_PAGE_SIZE = 8;
 const MIN_PRODUCT_CONTENT_CHARS = 12;
+const MAX_ORDER_REMARK_CHARS = 1000;
 
 const inputClass =
   'mt-2 h-10 w-full rounded-md border border-slate-300 bg-white px-3 text-sm outline-none focus:border-slate-950';
@@ -560,6 +562,12 @@ function AdminDashboard({
               onNextPage={() => void loadNextOrdersPage()}
               onPreviousPage={() => void loadPreviousOrdersPage()}
               onRefresh={() => void refreshOrders()}
+              onRemarkUpdated={(orderId, remark) => {
+                // 使用接口返回的规范化文本就地更新当前页，避免保存后整页刷新造成滚动位置丢失。
+                setOrders((current) =>
+                  current.map((order) => (order.id === orderId ? { ...order, remark } : order)),
+                );
+              }}
               orders={orders}
               page={ordersPage}
               pageSize={ADMIN_PAGE_SIZE}
@@ -1680,6 +1688,7 @@ function OrdersPanel({
   onNextPage,
   onPreviousPage,
   onRefresh,
+  onRemarkUpdated,
   orders,
   page,
   pageSize,
@@ -1689,6 +1698,7 @@ function OrdersPanel({
   onNextPage: () => void;
   onPreviousPage: () => void;
   onRefresh: () => void;
+  onRemarkUpdated: (orderId: string, remark: string) => void;
   orders: AdminOrder[];
   page: number;
   pageSize: number;
@@ -1713,7 +1723,7 @@ function OrdersPanel({
       </div>
 
       <div className="mt-4 overflow-x-auto">
-        <table className="min-w-[1180px] text-left text-sm">
+        <table className="min-w-[1460px] text-left text-sm">
           <thead className="border-b border-slate-200 text-xs uppercase text-slate-500">
             <tr>
               <th className="py-2 pr-3 font-medium">订单号</th>
@@ -1723,6 +1733,7 @@ function OrdersPanel({
               <th className="px-3 py-2 font-medium">支付渠道</th>
               <th className="px-3 py-2 font-medium">下单时间</th>
               <th className="px-3 py-2 font-medium">发货内容</th>
+              <th className="px-3 py-2 font-medium">备注</th>
             </tr>
           </thead>
           <tbody className="divide-y divide-slate-100">
@@ -1749,11 +1760,17 @@ function OrdersPanel({
                       : order.product_content ?? '未发货'}
                   </pre>
                 </td>
+                <td className="w-[300px] px-3 py-2">
+                  <OrderRemarkEditor
+                    onUpdated={(remark) => onRemarkUpdated(order.id, remark)}
+                    order={order}
+                  />
+                </td>
               </tr>
             ))}
             {orders.length === 0 && (
               <tr>
-                <td className="py-6 text-sm text-slate-500" colSpan={7}>
+                <td className="py-6 text-sm text-slate-500" colSpan={8}>
                   暂无订单
                 </td>
               </tr>
@@ -1771,6 +1788,89 @@ function OrdersPanel({
         total={total}
       />
     </section>
+  );
+}
+
+function OrderRemarkEditor({
+  onUpdated,
+  order,
+}: {
+  onUpdated: (remark: string) => void;
+  order: AdminOrder;
+}) {
+  const { showToast } = useToast();
+  const [draft, setDraft] = useState(order.remark);
+  const [saving, setSaving] = useState(false);
+
+  // 翻页、刷新或其他保存结果改变当前订单时，让编辑器同步数据库中的最新备注。
+  useEffect(() => {
+    setDraft(order.remark);
+  }, [order.id, order.remark]);
+
+  const normalizedDraft = draft.trim();
+  // Array.from 按 Unicode 码点计数，与后端 Rust chars 和 PostgreSQL char_length 的语义一致。
+  const remarkChars = Array.from(normalizedDraft).length;
+  const tooLong = remarkChars > MAX_ORDER_REMARK_CHARS;
+  const changed = normalizedDraft !== order.remark;
+
+  async function handleSave() {
+    if (!changed || tooLong || saving) {
+      return;
+    }
+
+    setSaving(true);
+    try {
+      const result = await updateAdminOrderRemark(order.id, { remark: draft });
+      setDraft(result.remark);
+      onUpdated(result.remark);
+      showToast({ message: result.remark ? '订单备注已保存' : '订单备注已清空', type: 'success' });
+    } catch (err) {
+      showToast({
+        message: err instanceof Error ? err.message : '订单备注保存失败',
+        type: 'error',
+      });
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  return (
+    <div>
+      <textarea
+        aria-label={`订单 ${order.id} 的备注`}
+        className="min-h-20 w-full resize-y rounded-md border border-slate-300 bg-white px-2 py-2 text-sm outline-none focus:border-slate-950"
+        disabled={saving}
+        onChange={(event) => setDraft(event.target.value)}
+        placeholder="暂无备注"
+        value={draft}
+      />
+      <div className="mt-1 flex items-center justify-between gap-2">
+        <span className={`text-xs ${tooLong ? 'text-red-600' : 'text-slate-400'}`}>
+          {remarkChars}/{MAX_ORDER_REMARK_CHARS}
+        </span>
+        <div className="flex gap-2">
+          {changed && (
+            <button
+              className="h-8 rounded-md border border-slate-300 bg-white px-2 text-xs font-medium text-slate-600 hover:border-slate-500 disabled:opacity-50"
+              disabled={saving}
+              onClick={() => setDraft(order.remark)}
+              type="button"
+            >
+              撤销
+            </button>
+          )}
+          <button
+            className="inline-flex h-8 items-center gap-1 rounded-md bg-slate-950 px-2 text-xs font-medium text-white disabled:cursor-not-allowed disabled:bg-slate-300"
+            disabled={!changed || tooLong || saving}
+            onClick={() => void handleSave()}
+            type="button"
+          >
+            {saving ? <Loader2 className="animate-spin" size={14} /> : <Save size={14} />}
+            保存
+          </button>
+        </div>
+      </div>
+    </div>
   );
 }
 
