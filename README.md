@@ -266,16 +266,6 @@ docker compose -f deploy/compose.yml up -d pgbackrest-backup qddxp
 只读映射到 Dockerfile 预设的容器路径，不再挂载整个目录，也无需配置容器内路径。
 应用启动时会解析 Logo 内容并确认其为 SVG，而不是信任文件扩展名。
 
-创建订单接口 `POST /api/orders` 使用固定窗口，按客户端 IP 限制为每 3 分钟 5 次；
-第 6 次请求返回 `429`。验证码接口 `GET /api/captcha` 每 3 分钟最多请求 20 次；
-管理员登录接口 `POST /api/admin/session` 按 IP 限制为每 1 分钟 3 次，第 4 次返回
-`429`。三个接口的计数窗口相互独立，其他接口不参与应用层限流。
-直连部署根据 TCP 对端 IP 计数；
-部署在反向代理后时，需要将代理的精确地址（优先 `/32` 或 `/128`）配置到
-`RATE_LIMIT_TRUSTED_PROXY_CIDRS`，并让代理正确
-追加或覆盖 `X-Forwarded-For`。不要填写不受控制的客户端网段。限流状态保存在进程
-内，多实例部署时每个实例独立计数。
-
 ### 管理后台会话
 
 访问 `/admin` 后使用 `ADMIN_KEY` 登录。登录成功后，浏览器只保存服务端签发的

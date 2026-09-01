@@ -7,8 +7,7 @@ pub mod wechatpay;
 use axum::{
     Json, Router,
     http::{HeaderValue, StatusCode, header::CONTENT_TYPE},
-    middleware,
-    routing::{get, patch, post},
+    routing::{any, get, patch, post},
 };
 use serde_json::json;
 use tower_http::{
@@ -22,12 +21,22 @@ use crate::{AppState, http::rate_limit};
 
 pub fn router(state: AppState) -> Router {
     let trusted_proxy_cidrs = &state.config.rate_limit_trusted_proxy_cidrs;
-    let order_creation_limiter =
-        rate_limit::FixedWindowRateLimiter::for_order_creation(trusted_proxy_cidrs);
-    let captcha_issue_limiter =
-        rate_limit::FixedWindowRateLimiter::for_captcha_issue(trusted_proxy_cidrs);
-    let admin_login_limiter =
-        rate_limit::FixedWindowRateLimiter::for_admin_login(trusted_proxy_cidrs);
+    let rate_limit::RateLimitLayers {
+        api_global,
+        public_read,
+        captcha_issue,
+        order_creation,
+        order_query,
+        orders_by_contact,
+        admin_login,
+        admin_session,
+        admin_authenticated,
+        epay_notify,
+        wechatpay_notify,
+        unknown_api,
+        health,
+        static_files: static_file_limit,
+    } = rate_limit::RateLimitLayers::new(trusted_proxy_cidrs);
 
     let web_dist_dir = state.config.web_dist_dir.clone();
     let index_file = web_dist_dir.join("index.html");
@@ -42,45 +51,48 @@ pub fn router(state: AppState) -> Router {
         HeaderValue::from_static("image/svg+xml"),
     );
 
-    let api = Router::new()
+    let public_read_api = Router::new()
         .route("/storefront", get(public::get_storefront))
         .route_service("/storefront/logo", shop_logo)
         .route("/products", get(public::list_products))
         .route("/products/{id}", get(public::get_product))
         .route("/payment-methods", get(public::list_payment_methods))
+        .layer(public_read);
+
+    let public_action_api = Router::new()
+        .route("/captcha", get(public::issue_captcha).layer(captcha_issue))
+        .route("/orders", post(public::create_order).layer(order_creation))
         .route(
-            "/captcha",
-            get(public::issue_captcha).layer(middleware::from_fn_with_state(
-                captcha_issue_limiter,
-                rate_limit::enforce_fixed_window_limit,
-            )),
+            "/orders/by-contact",
+            post(public::list_orders_by_contact).layer(orders_by_contact),
         )
         .route(
-            "/orders",
-            post(public::create_order).layer(middleware::from_fn_with_state(
-                order_creation_limiter,
-                rate_limit::enforce_fixed_window_limit,
-            )),
-        )
-        .route("/orders/by-contact", post(public::list_orders_by_contact))
-        .route("/orders/query", post(public::query_order))
+            "/orders/query",
+            post(public::query_order).layer(order_query),
+        );
+
+    let payment_callback_api = Router::new()
         .route(
             "/payments/epay/notify",
-            get(epay::notify_query).post(epay::notify_form),
+            get(epay::notify_query)
+                .post(epay::notify_form)
+                .layer(epay_notify),
         )
-        .route("/payments/wechatpay/notify", post(wechatpay::notify))
         .route(
-            "/admin/session",
-            get(admin_auth::status)
-                .delete(admin_auth::logout)
-                // 限流只包裹 POST 登录处理器，会话状态查询和退出登录不消耗登录配额。
-                .merge(
-                    post(admin_auth::login).layer(middleware::from_fn_with_state(
-                        admin_login_limiter,
-                        rate_limit::enforce_fixed_window_limit,
-                    )),
-                ),
-        )
+            "/payments/wechatpay/notify",
+            post(wechatpay::notify).layer(wechatpay_notify),
+        );
+
+    let admin_session_api = Router::new().route(
+        "/admin/session",
+        get(admin_auth::status)
+            .delete(admin_auth::logout)
+            .layer(admin_session)
+            // 登录、状态查询与退出分别使用业务额度，避免状态轮询消耗登录配额。
+            .merge(post(admin_auth::login).layer(admin_login)),
+    );
+
+    let admin_api = Router::new()
         .route(
             "/admin/product-info",
             get(admin::list_product_info).post(admin::create_product_info),
@@ -111,7 +123,19 @@ pub fn router(state: AppState) -> Router {
             patch(admin::update_order_remark),
         )
         .route("/admin/api-call-logs", get(admin::list_api_call_logs))
-        .fallback(api_not_found)
+        .layer(admin_authenticated);
+
+    // 支付通知拥有完全独立的计数桶，不参与访客全局额度，避免支付平台共享出口或重试
+    // 流量被普通访客耗尽。其他已知 API 同时消耗业务桶和全局安全网额度。
+    let visitor_api = Router::new()
+        .merge(public_read_api)
+        .merge(public_action_api)
+        .merge(admin_session_api)
+        .merge(admin_api)
+        .layer(api_global);
+    let api = visitor_api
+        .merge(payment_callback_api)
+        .fallback_service(any(api_not_found).layer(unknown_api))
         .layer(
             TraceLayer::new_for_http()
                 .make_span_with(DefaultMakeSpan::new().level(Level::INFO))
@@ -122,9 +146,16 @@ pub fn router(state: AppState) -> Router {
         .with_state(state);
 
     Router::new()
-        .route("/health", get(|| async { Json(json!({ "ok": true })) }))
+        .route(
+            "/health",
+            get(|| async { Json(json!({ "ok": true })) }).layer(health),
+        )
         .nest("/api", api)
-        .fallback_service(static_files)
+        .merge(
+            Router::new()
+                .fallback_service(static_files)
+                .layer(static_file_limit),
+        )
 }
 
 async fn api_not_found() -> (StatusCode, Json<serde_json::Value>) {

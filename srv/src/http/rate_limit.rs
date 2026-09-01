@@ -1,169 +1,224 @@
 use std::{
     net::{IpAddr, SocketAddr},
+    num::NonZeroU32,
     sync::Arc,
-    time::{Duration, Instant},
 };
 
 use axum::{
     Json,
-    extract::{ConnectInfo, Request, State},
-    http::StatusCode,
-    middleware::Next,
+    extract::ConnectInfo,
+    http::{StatusCode, request::Parts},
     response::{IntoResponse, Response},
 };
-use dashmap::DashMap;
+use axum_governor::{
+    ExtractionError, GovernorConfigBuilder, GovernorLayer, KeyExtractor, KeyOutcome, Quota,
+    RejectionReason,
+};
 use ipnet::IpNet;
 use serde_json::json;
 
 const X_FORWARDED_FOR: &str = "x-forwarded-for";
-const ORDER_CREATION_LIMIT_WINDOW: Duration = Duration::from_secs(3 * 60);
-const ORDER_CREATION_LIMIT_MAX_REQUESTS: u32 = 5;
-const CAPTCHA_ISSUE_LIMIT_WINDOW: Duration = Duration::from_secs(3 * 60);
-const CAPTCHA_ISSUE_LIMIT_MAX_REQUESTS: u32 = 20;
-const ADMIN_LOGIN_LIMIT_WINDOW: Duration = Duration::from_secs(60);
-const ADMIN_LOGIN_LIMIT_MAX_REQUESTS: u32 = 3;
-const CLEANUP_INTERVAL: Duration = Duration::from_secs(60);
 
-#[derive(Clone, Copy, Debug)]
+/// 所有限流器都从同一个可信代理配置解析客户端 IP，但每个字段拥有独立的令牌桶，
+/// 从而让全局、业务分组和支付回调额度可以按路由自由组合。
+pub struct RateLimitLayers {
+    pub api_global: GovernorLayer<IpAddr>,
+    pub public_read: GovernorLayer<IpAddr>,
+    pub captcha_issue: GovernorLayer<IpAddr>,
+    pub order_creation: GovernorLayer<IpAddr>,
+    pub order_query: GovernorLayer<IpAddr>,
+    pub orders_by_contact: GovernorLayer<IpAddr>,
+    pub admin_login: GovernorLayer<IpAddr>,
+    pub admin_session: GovernorLayer<IpAddr>,
+    pub admin_authenticated: GovernorLayer<IpAddr>,
+    pub epay_notify: GovernorLayer<IpAddr>,
+    pub wechatpay_notify: GovernorLayer<IpAddr>,
+    pub unknown_api: GovernorLayer<IpAddr>,
+    pub health: GovernorLayer<IpAddr>,
+    pub static_files: GovernorLayer<IpAddr>,
+}
+
+impl RateLimitLayers {
+    pub fn new(trusted_proxy_cidrs: &[IpNet]) -> Self {
+        let client_ip = TrustedClientIpExtractor::new(trusted_proxy_cidrs);
+        tracing::info!(
+            trusted_proxy_cidrs = ?trusted_proxy_cidrs,
+            "initializing IP token-bucket rate limiters"
+        );
+
+        Self {
+            api_global: build_layer(
+                client_ip.clone(),
+                RateLimitPolicy::per_minute("api_global", 120, 40),
+            ),
+            public_read: build_layer(
+                client_ip.clone(),
+                RateLimitPolicy::per_minute("public_read", 60, 20),
+            ),
+            captcha_issue: build_layer(
+                client_ip.clone(),
+                RateLimitPolicy::spaced("captcha_issue", 20, 180, 9, 5),
+            ),
+            order_creation: build_layer(
+                client_ip.clone(),
+                RateLimitPolicy::spaced("order_creation", 5, 180, 36, 5),
+            ),
+            order_query: build_layer(
+                client_ip.clone(),
+                RateLimitPolicy::per_minute("order_query", 60, 15),
+            ),
+            orders_by_contact: build_layer(
+                client_ip.clone(),
+                RateLimitPolicy::per_minute("orders_by_contact", 10, 5),
+            ),
+            admin_login: build_layer(
+                client_ip.clone(),
+                RateLimitPolicy::per_minute("admin_login", 3, 3),
+            ),
+            admin_session: build_layer(
+                client_ip.clone(),
+                RateLimitPolicy::per_minute("admin_session", 30, 10),
+            ),
+            admin_authenticated: build_layer(
+                client_ip.clone(),
+                RateLimitPolicy::per_minute("admin_authenticated", 120, 30),
+            ),
+            // 支付平台可能从共享出口集中投递或重试通知，因此各平台使用独立且宽松的桶，
+            // 也不参与访客 API 的全局额度。
+            epay_notify: build_layer(
+                client_ip.clone(),
+                RateLimitPolicy::per_minute("epay_notify", 300, 100),
+            ),
+            wechatpay_notify: build_layer(
+                client_ip.clone(),
+                RateLimitPolicy::per_minute("wechatpay_notify", 300, 100),
+            ),
+            unknown_api: build_layer(
+                client_ip.clone(),
+                RateLimitPolicy::per_minute("unknown_api", 30, 10),
+            ),
+            health: build_layer(
+                client_ip.clone(),
+                RateLimitPolicy::per_minute("health", 60, 10),
+            ),
+            static_files: build_layer(
+                client_ip,
+                RateLimitPolicy::per_minute("static_files", 300, 100),
+            ),
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
 struct RateLimitPolicy {
     scope: &'static str,
-    window: Duration,
-    max_requests: u32,
-    error_message: &'static str,
+    quota: Quota,
+    rate_requests: u32,
+    rate_window_seconds: u64,
+    burst: u32,
 }
 
-const ORDER_CREATION_POLICY: RateLimitPolicy = RateLimitPolicy {
-    scope: "order_creation",
-    window: ORDER_CREATION_LIMIT_WINDOW,
-    max_requests: ORDER_CREATION_LIMIT_MAX_REQUESTS,
-    error_message: "too many order creation requests",
-};
-
-const ADMIN_LOGIN_POLICY: RateLimitPolicy = RateLimitPolicy {
-    scope: "admin_login",
-    window: ADMIN_LOGIN_LIMIT_WINDOW,
-    max_requests: ADMIN_LOGIN_LIMIT_MAX_REQUESTS,
-    error_message: "too many admin login requests",
-};
-
-const CAPTCHA_ISSUE_POLICY: RateLimitPolicy = RateLimitPolicy {
-    scope: "captcha_issue",
-    window: CAPTCHA_ISSUE_LIMIT_WINDOW,
-    max_requests: CAPTCHA_ISSUE_LIMIT_MAX_REQUESTS,
-    error_message: "too many CAPTCHA requests",
-};
-
-#[derive(Debug)]
-struct FixedWindow {
-    started_at: Instant,
-    accepted_requests: u32,
-}
-
-/// 按客户端 IP 计数的固定窗口限流器。每个业务入口创建独立实例，因此管理员
-/// 登录与创建订单不会相互消耗配额。DashMap 保证同一 IP 的并发计数更新原子化，
-/// 克隆中间件状态时仍共享同一实例的计数表，避免并发请求绕过限制。
-#[derive(Clone, Debug)]
-pub struct FixedWindowRateLimiter {
-    windows: Arc<DashMap<IpAddr, FixedWindow>>,
-    trusted_proxy_cidrs: Arc<[IpNet]>,
-    policy: RateLimitPolicy,
-}
-
-impl FixedWindowRateLimiter {
-    pub fn for_order_creation(trusted_proxy_cidrs: &[IpNet]) -> Self {
-        Self::new(trusted_proxy_cidrs, ORDER_CREATION_POLICY)
-    }
-
-    pub fn for_admin_login(trusted_proxy_cidrs: &[IpNet]) -> Self {
-        Self::new(trusted_proxy_cidrs, ADMIN_LOGIN_POLICY)
-    }
-
-    pub fn for_captcha_issue(trusted_proxy_cidrs: &[IpNet]) -> Self {
-        Self::new(trusted_proxy_cidrs, CAPTCHA_ISSUE_POLICY)
-    }
-
-    fn new(trusted_proxy_cidrs: &[IpNet], policy: RateLimitPolicy) -> Self {
-        let windows = Arc::new(DashMap::<IpAddr, FixedWindow>::new());
-        let cleanup_windows = Arc::clone(&windows);
-        tokio::spawn(async move {
-            let mut interval = tokio::time::interval(CLEANUP_INTERVAL);
-            interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-            interval.tick().await;
-            loop {
-                interval.tick().await;
-                let now = Instant::now();
-                let entries_before = cleanup_windows.len();
-                cleanup_windows.retain(|_, window| {
-                    now.saturating_duration_since(window.started_at) < policy.window
-                });
-                tracing::debug!(
-                    rate_limit_scope = policy.scope,
-                    entries_before,
-                    entries_after = cleanup_windows.len(),
-                    "expired fixed-window rate limit entries cleaned"
-                );
-            }
-        });
-
-        tracing::info!(
-            rate_limit_scope = policy.scope,
-            window_seconds = policy.window.as_secs(),
-            max_requests = policy.max_requests,
-            trusted_proxy_cidrs = ?trusted_proxy_cidrs,
-            "fixed-window rate limiter initialized"
-        );
+impl RateLimitPolicy {
+    fn per_minute(scope: &'static str, requests: u32, burst: u32) -> Self {
         Self {
-            windows,
+            scope,
+            quota: Quota::requests_per_minute(non_zero(requests)).burst(non_zero(burst)),
+            rate_requests: requests,
+            rate_window_seconds: 60,
+            burst,
+        }
+    }
+
+    fn spaced(
+        scope: &'static str,
+        requests: u32,
+        window_seconds: u64,
+        seconds_per_request: u32,
+        burst: u32,
+    ) -> Self {
+        Self {
+            scope,
+            quota: Quota::seconds_per_request(non_zero(seconds_per_request)).burst(non_zero(burst)),
+            rate_requests: requests,
+            rate_window_seconds: window_seconds,
+            burst,
+        }
+    }
+}
+
+fn non_zero(value: u32) -> NonZeroU32 {
+    NonZeroU32::new(value).expect("rate-limit values are positive constants")
+}
+
+fn build_layer(
+    client_ip: TrustedClientIpExtractor,
+    policy: RateLimitPolicy,
+) -> GovernorLayer<IpAddr> {
+    tracing::info!(
+        rate_limit_scope = policy.scope,
+        rate_requests = policy.rate_requests,
+        rate_window_seconds = policy.rate_window_seconds,
+        burst = policy.burst,
+        "IP token-bucket rate limiter initialized"
+    );
+
+    let config = GovernorConfigBuilder::default()
+        .with_extractor(client_ip)
+        .expect_connect_info()
+        .quota_default(policy.quota)
+        .error_handler(move |reason| rejection_response(policy.scope, reason))
+        .finish()
+        .expect("static rate-limit configuration must be valid");
+    GovernorLayer::new(config)
+}
+
+#[derive(Clone, Debug)]
+struct TrustedClientIpExtractor {
+    trusted_proxy_cidrs: Arc<[IpNet]>,
+}
+
+impl TrustedClientIpExtractor {
+    fn new(trusted_proxy_cidrs: &[IpNet]) -> Self {
+        Self {
             trusted_proxy_cidrs: Arc::from(trusted_proxy_cidrs),
-            policy,
         }
     }
 
-    fn try_acquire(&self, client_ip: IpAddr) -> Result<(), Duration> {
-        let now = Instant::now();
-        let mut window = self.windows.entry(client_ip).or_insert(FixedWindow {
-            started_at: now,
-            accepted_requests: 0,
-        });
-        let elapsed = now.saturating_duration_since(window.started_at);
-
-        if elapsed >= self.policy.window {
-            *window = FixedWindow {
-                started_at: now,
-                accepted_requests: 1,
-            };
-            return Ok(());
-        }
-        if window.accepted_requests >= self.policy.max_requests {
-            return Err(self.policy.window.saturating_sub(elapsed));
-        }
-
-        window.accepted_requests += 1;
-        Ok(())
+    fn is_trusted_proxy(&self, ip: IpAddr) -> bool {
+        self.trusted_proxy_cidrs
+            .iter()
+            .any(|network| network.contains(&ip))
     }
+}
 
-    fn client_ip(&self, request: &Request) -> Result<IpAddr, ClientIpError> {
-        let peer_ip = request
-            .extensions()
+impl KeyExtractor for TrustedClientIpExtractor {
+    type Key = IpAddr;
+
+    fn extract(&self, parts: &Parts) -> Result<KeyOutcome<Self::Key>, ExtractionError> {
+        let peer_ip = parts
+            .extensions
             .get::<ConnectInfo<SocketAddr>>()
             .map(|ConnectInfo(address)| address.ip())
-            .ok_or(ClientIpError::MissingConnectInfo)?;
+            .ok_or(ExtractionError::MissingConnectInfo)?;
         if !self.is_trusted_proxy(peer_ip) {
-            return Ok(peer_ip);
+            return Ok(KeyOutcome {
+                key: peer_ip,
+                quota_override: None,
+            });
         }
 
-        // X-Forwarded-For 从左到右是客户端到代理链。只有当前一跳属于受信网段时才继续
-        // 向左剥离，攻击者预置的伪造地址无法越过第一个非受信来源地址。
+        // X-Forwarded-For 从左到右记录客户端到代理链。只有当前一跳属于受信网段时才
+        // 继续向左剥离，因此攻击者预置的伪造地址无法越过第一个非受信来源地址。
         let mut forwarded_hops = Vec::new();
-        for value in request.headers().get_all(X_FORWARDED_FOR) {
+        for value in parts.headers.get_all(X_FORWARDED_FOR) {
             let value = value
                 .to_str()
-                .map_err(|_| ClientIpError::InvalidForwardedFor)?;
+                .map_err(|_| ExtractionError::MalformedHeader(X_FORWARDED_FOR))?;
             for hop in value.split(',') {
                 forwarded_hops.push(
                     hop.trim()
                         .parse::<IpAddr>()
-                        .map_err(|_| ClientIpError::InvalidForwardedFor)?,
+                        .map_err(|_| ExtractionError::MalformedHeader(X_FORWARDED_FOR))?,
                 );
             }
         }
@@ -175,71 +230,80 @@ impl FixedWindowRateLimiter {
             }
             client_ip = hop;
         }
-        Ok(client_ip)
+
+        Ok(KeyOutcome {
+            key: client_ip,
+            quota_override: None,
+        })
     }
 
-    fn is_trusted_proxy(&self, ip: IpAddr) -> bool {
-        self.trusted_proxy_cidrs
-            .iter()
-            .any(|network| network.contains(&ip))
+    fn requires_connect_info(&self) -> bool {
+        true
     }
 }
 
-#[derive(Debug)]
-enum ClientIpError {
-    MissingConnectInfo,
-    InvalidForwardedFor,
-}
-
-/// 此中间件只挂载到明确需要限流的 MethodRouter，不会计数其他 API。
-pub async fn enforce_fixed_window_limit(
-    State(limiter): State<FixedWindowRateLimiter>,
-    request: Request,
-    next: Next,
-) -> Response {
-    let client_ip = match limiter.client_ip(&request) {
-        Ok(client_ip) => client_ip,
-        Err(error) => {
-            // IP 无法识别时失败关闭，避免通过畸形代理头绕过限流。
-            tracing::error!(
-                rate_limit_scope = limiter.policy.scope,
-                error = ?error,
-                "rate limiter could not determine client IP"
+fn rejection_response(scope: &'static str, reason: RejectionReason) -> Response {
+    match reason {
+        RejectionReason::QuotaExceeded {
+            wait,
+            key,
+            policy_name,
+            ..
+        } => {
+            let retry_after_seconds = wait.as_secs().max(1);
+            let client_ip = key.downcast_ref::<IpAddr>().copied();
+            tracing::warn!(
+                rate_limit_scope = scope,
+                limiter_policy = %policy_name,
+                ?client_ip,
+                retry_after_seconds,
+                "request rejected by IP token-bucket rate limiter"
             );
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(json!({ "error": "unable to determine client IP" })),
+            (
+                StatusCode::TOO_MANY_REQUESTS,
+                Json(json!({
+                    "error": "too_many_requests",
+                    "rate_limit_scope": scope,
+                    "retry_after_seconds": retry_after_seconds,
+                })),
             )
-                .into_response();
+                .into_response()
         }
-    };
-
-    if let Err(retry_after) = limiter.try_acquire(client_ip) {
-        // Retry-After 使用向上取整的整秒数，避免不足一秒时返回 0 导致客户端立即重试。
-        let retry_after_seconds = retry_after.as_secs() + u64::from(retry_after.subsec_nanos() > 0);
-        tracing::warn!(
-            rate_limit_scope = limiter.policy.scope,
-            %client_ip,
-            retry_after_seconds,
-            "request rejected by fixed-window rate limiter"
-        );
-        let mut response = (
-            StatusCode::TOO_MANY_REQUESTS,
-            Json(json!({
-                "error": limiter.policy.error_message,
-                "retry_after_seconds": retry_after_seconds,
-            })),
-        )
-            .into_response();
-        response.headers_mut().insert(
-            "retry-after",
-            retry_after_seconds
-                .to_string()
-                .parse()
-                .expect("正整数秒数一定是合法响应头值"),
-        );
-        return response;
+        RejectionReason::KeyExtractionFailed(error) => {
+            let status = match &error {
+                ExtractionError::MalformedHeader(_)
+                | ExtractionError::MissingHeader(_)
+                | ExtractionError::UntrustedProxy => StatusCode::BAD_REQUEST,
+                ExtractionError::MissingConnectInfo | ExtractionError::Other(_) => {
+                    StatusCode::INTERNAL_SERVER_ERROR
+                }
+            };
+            if status.is_server_error() {
+                tracing::error!(
+                    rate_limit_scope = scope,
+                    error = ?error,
+                    "rate limiter could not determine client IP"
+                );
+            } else {
+                tracing::warn!(
+                    rate_limit_scope = scope,
+                    error = ?error,
+                    "rate limiter rejected invalid client IP metadata"
+                );
+            }
+            let error_message = if status.is_server_error() {
+                "unable to determine client IP"
+            } else {
+                "invalid client IP forwarding metadata"
+            };
+            (
+                status,
+                Json(json!({
+                    "error": error_message,
+                    "rate_limit_scope": scope,
+                })),
+            )
+                .into_response()
+        }
     }
-
-    next.run(request).await
 }
