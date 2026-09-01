@@ -38,3 +38,9 @@ tracing-appender = "0.2.5"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 urlencoding = "2"
 uuid = { version = "1", features = ["serde", "v4"] }
+
+[profile.release]
+# 剥离符号并对完整依赖图执行链接时优化，减小生产镜像中的服务端二进制。
+strip = "symbols"
+lto = "thin"
+codegen-units = 1
