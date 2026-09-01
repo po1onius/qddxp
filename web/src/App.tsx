@@ -921,8 +921,8 @@ function CheckoutPage({
             required
             value={captchaAnswer}
           />
-          <div className="flex h-[90px] items-center gap-2 sm:h-11">
-            <div className="flex h-[90px] w-[220px] items-center justify-center overflow-hidden rounded-md border border-slate-300 bg-slate-50 sm:h-11 sm:w-[132px]">
+          <div className="flex h-[90px] items-center gap-2 sm:h-[54px]">
+            <div className="flex h-[90px] w-[220px] items-center justify-center overflow-hidden rounded-md border border-slate-300 bg-slate-50 sm:h-[54px] sm:w-[132px]">
               {captchaChallenge && !captchaLoading ? (
                 <img
                   alt="下单验证码"
