@@ -5,5 +5,6 @@ DROP TABLE IF EXISTS payment_attempts;
 DROP TABLE IF EXISTS orders;
 DROP TABLE IF EXISTS products;
 DROP TABLE IF EXISTS product_info;
+DROP TABLE IF EXISTS storefront_settings;
 
 -- pgcrypto 可能由同一数据库中的其他应用预先安装，因此回滚时不删除共享扩展。

@@ -16,8 +16,13 @@ use uuid::Uuid;
 use crate::{
     AppState,
     db::{
-        models::{ApiCallLog, NewProduct, NewProductInfo, ProductInfo},
-        schema::{api_call_logs, orders, payment_attempts, product_info, products},
+        models::{
+            ApiCallLog, NewProduct, NewProductInfo, ProductInfo, STOREFRONT_SETTINGS_ID,
+            StorefrontSettings,
+        },
+        schema::{
+            api_call_logs, orders, payment_attempts, product_info, products, storefront_settings,
+        },
     },
     domain::{OrderStatus, ProductStatus},
     error::AppError,
@@ -39,6 +44,20 @@ const VISIBLE_PRODUCT_CONTENT_PREFIX_CHARS: usize = 4;
 /// 应用层校验用于返回明确错误，首个 migration 中的 CHECK 约束是最终数据边界；两者
 /// 都使用字符数而非 UTF-8 字节数，保证中文、emoji 等内容的计数符合管理员直觉。
 const MAX_ORDER_REMARK_CHARS: usize = 1000;
+
+/// 商城公告允许保存的最大 Unicode 字符数，与首个 migration 的 CHECK 约束保持一致。
+const MAX_ANNOUNCEMENT_CHARS: usize = 10_000;
+
+#[derive(Debug, Deserialize)]
+pub struct UpdateAnnouncementRequest {
+    pub announcement: String,
+}
+
+#[derive(Debug, Serialize)]
+pub struct AnnouncementSettingsResponse {
+    pub announcement: String,
+    pub updated_at: DateTime<Utc>,
+}
 
 #[derive(Debug, Deserialize)]
 pub struct CreateProductInfoRequest {
@@ -163,6 +182,74 @@ fn mask_product_content(content: &str) -> String {
         .take(VISIBLE_PRODUCT_CONTENT_PREFIX_CHARS)
         .collect::<String>();
     format!("{visible_prefix}****")
+}
+
+pub async fn get_announcement_settings(
+    State(state): State<AppState>,
+    session: Session,
+) -> Result<Json<AnnouncementSettingsResponse>, AppError> {
+    require_admin_for(&session, "get_announcement_settings").await?;
+    tracing::info!("admin loading announcement settings");
+    let mut conn = state.pool.get().await?;
+    let settings = storefront_settings::table
+        .find(STOREFRONT_SETTINGS_ID)
+        .first::<StorefrontSettings>(&mut conn)
+        .await?;
+    tracing::info!(
+        announcement_chars = settings.announcement.chars().count(),
+        announcement_empty = settings.announcement.is_empty(),
+        updated_at = %settings.updated_at,
+        "admin loaded announcement settings"
+    );
+    Ok(Json(announcement_settings_response(settings)))
+}
+
+pub async fn update_announcement(
+    State(state): State<AppState>,
+    session: Session,
+    Json(request): Json<UpdateAnnouncementRequest>,
+) -> Result<Json<AnnouncementSettingsResponse>, AppError> {
+    require_admin_for(&session, "update_announcement").await?;
+    let announcement = request.announcement.trim();
+    let announcement_chars = announcement.chars().count();
+    if announcement_chars > MAX_ANNOUNCEMENT_CHARS {
+        tracing::warn!(
+            announcement_chars,
+            max_announcement_chars = MAX_ANNOUNCEMENT_CHARS,
+            "admin announcement update rejected: content is too long"
+        );
+        return Err(AppError::BadRequest(format!(
+            "公告内容不能超过 {MAX_ANNOUNCEMENT_CHARS} 个字符"
+        )));
+    }
+
+    tracing::info!(
+        announcement_chars,
+        announcement_empty = announcement.is_empty(),
+        "admin updating announcement"
+    );
+    let mut conn = state.pool.get().await?;
+    let settings = diesel::update(storefront_settings::table.find(STOREFRONT_SETTINGS_ID))
+        .set((
+            storefront_settings::announcement.eq(announcement),
+            storefront_settings::updated_at.eq(Utc::now()),
+        ))
+        .get_result::<StorefrontSettings>(&mut conn)
+        .await?;
+    tracing::info!(
+        announcement_chars = settings.announcement.chars().count(),
+        announcement_empty = settings.announcement.is_empty(),
+        updated_at = %settings.updated_at,
+        "admin updated announcement"
+    );
+    Ok(Json(announcement_settings_response(settings)))
+}
+
+fn announcement_settings_response(settings: StorefrontSettings) -> AnnouncementSettingsResponse {
+    AnnouncementSettingsResponse {
+        announcement: settings.announcement,
+        updated_at: settings.updated_at,
+    }
 }
 
 pub async fn create_product_info(

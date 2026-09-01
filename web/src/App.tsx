@@ -1,6 +1,6 @@
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { FormEvent } from 'react';
-import { CheckCircle2, ChevronLeft, ChevronRight, ClipboardCheck, CreditCard, RefreshCcw, Search, TriangleAlert, X } from 'lucide-react';
+import { CheckCircle2, ChevronLeft, ChevronRight, ClipboardCheck, CreditCard, Megaphone, RefreshCcw, Search, TriangleAlert, X } from 'lucide-react';
 import QRCode from 'qrcode';
 import { Link, Route, Routes, useNavigate, useParams } from 'react-router-dom';
 import { AdminApp } from './AdminApp';
@@ -8,6 +8,7 @@ import { StoreBrand } from './StoreBrand';
 import { useToast } from './Toast';
 import {
   createOrder,
+  getCaptchaChallenge,
   getProduct,
   getStorefrontConfig,
   listOrdersByContact,
@@ -15,7 +16,7 @@ import {
   listProductPage,
   queryOrder,
 } from './api/client';
-import type { CreateOrderResult, OrderDetail, OrderSummary, PaymentMethod, Product, StorefrontConfig } from './types';
+import type { CaptchaChallenge, CreateOrderResult, OrderDetail, OrderSummary, PaymentMethod, Product, StorefrontConfig } from './types';
 
 type PaymentReturnState =
   | { kind: 'none' }
@@ -143,6 +144,7 @@ function ShopApp({ storefront }: { storefront: StorefrontConfig }) {
   const [productPage, setProductPage] = useState(1);
   const [productTotal, setProductTotal] = useState(0);
   const [detailsProduct, setDetailsProduct] = useState<Product | null>(null);
+  const [announcementOpen, setAnnouncementOpen] = useState(false);
   const [loadingProducts, setLoadingProducts] = useState(true);
 
   useEffect(() => {
@@ -184,6 +186,14 @@ function ShopApp({ storefront }: { storefront: StorefrontConfig }) {
         <div className="mx-auto flex max-w-7xl flex-col gap-4 px-4 py-4 sm:flex-row sm:items-center sm:justify-between lg:px-8">
           <StoreBrand storefront={storefront} />
           <nav className="flex flex-wrap gap-2" aria-label="主导航">
+            <button
+              className="inline-flex h-10 items-center gap-2 rounded-md border border-slate-300 bg-white px-3 text-sm font-medium text-slate-700 transition hover:border-slate-500"
+              onClick={() => setAnnouncementOpen(true)}
+              type="button"
+            >
+              <Megaphone size={18} />
+              公告
+            </button>
             <Link
               className="inline-flex h-10 items-center gap-2 rounded-md border border-slate-300 bg-white px-3 text-sm font-medium text-slate-700 transition hover:border-slate-500"
               to={ORDER_QUERY_PAGE_PATH}
@@ -221,6 +231,59 @@ function ShopApp({ storefront }: { storefront: StorefrontConfig }) {
           product={detailsProduct}
         />
       )}
+      {announcementOpen && (
+        <AnnouncementModal
+          announcement={storefront.announcement}
+          onClose={() => setAnnouncementOpen(false)}
+        />
+      )}
+    </div>
+  );
+}
+
+function AnnouncementModal({ announcement, onClose }: { announcement: string; onClose: () => void }) {
+  useEffect(() => {
+    function handleKeyDown(event: KeyboardEvent) {
+      if (event.key === 'Escape') {
+        onClose();
+      }
+    }
+    window.addEventListener('keydown', handleKeyDown);
+    return () => window.removeEventListener('keydown', handleKeyDown);
+  }, [onClose]);
+
+  return (
+    <div
+      aria-labelledby="announcement-title"
+      aria-modal="true"
+      className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/60 p-4"
+      onClick={onClose}
+      role="dialog"
+    >
+      <section
+        className="w-full max-w-xl rounded-lg bg-white p-6 shadow-xl"
+        onClick={(event) => event.stopPropagation()}
+      >
+        <div className="flex items-start justify-between gap-4">
+          <div className="flex items-center gap-2">
+            <Megaphone className="text-slate-700" size={21} />
+            <h2 className="text-lg font-semibold" id="announcement-title">商城公告</h2>
+          </div>
+          <button
+            aria-label="关闭公告"
+            className="rounded p-1 text-slate-500 hover:bg-slate-100"
+            onClick={onClose}
+            type="button"
+          >
+            <X size={20} />
+          </button>
+        </div>
+        <div className="mt-5 max-h-[60vh] overflow-y-auto rounded-md border border-slate-200 bg-slate-50 p-4">
+          <p className="whitespace-pre-wrap break-words text-sm leading-7 text-slate-700">
+            {announcement || '暂无公告'}
+          </p>
+        </div>
+      </section>
     </div>
   );
 }
@@ -601,11 +664,46 @@ function CheckoutPage({
   const { showToast } = useToast();
   const [contact, setContact] = useState('');
   const [orderPassword, setOrderPassword] = useState('');
+  const [captchaAnswer, setCaptchaAnswer] = useState('');
+  const [captchaChallenge, setCaptchaChallenge] = useState<CaptchaChallenge | null>(null);
+  const [captchaLoading, setCaptchaLoading] = useState(true);
+  const [captchaError, setCaptchaError] = useState('');
+  const captchaRequestId = useRef(0);
   const [selectedPayment, setSelectedPayment] = useState<PaymentMethod | null>(null);
   const [submitting, setSubmitting] = useState(false);
   const [qrOrder, setQrOrder] = useState<CreateOrderResult | null>(null);
   const [qrImage, setQrImage] = useState('');
   const [remainingSeconds, setRemainingSeconds] = useState(0);
+
+  const refreshCaptcha = useCallback(async () => {
+    const requestId = ++captchaRequestId.current;
+    setCaptchaLoading(true);
+    setCaptchaError('');
+    setCaptchaAnswer('');
+    try {
+      const challenge = await getCaptchaChallenge();
+      if (requestId === captchaRequestId.current) {
+        setCaptchaChallenge(challenge);
+      }
+    } catch (error) {
+      console.error('加载下单验证码失败', { error });
+      if (requestId === captchaRequestId.current) {
+        setCaptchaChallenge(null);
+        setCaptchaError(error instanceof Error ? error.message : '验证码加载失败');
+      }
+    } finally {
+      if (requestId === captchaRequestId.current) {
+        setCaptchaLoading(false);
+      }
+    }
+  }, []);
+
+  useEffect(() => {
+    void refreshCaptcha();
+    return () => {
+      captchaRequestId.current += 1;
+    };
+  }, [refreshCaptcha]);
 
   useEffect(() => {
     if (!selectedPayment && paymentMethods.length > 0) {
@@ -726,6 +824,10 @@ function CheckoutPage({
       showToast({ message: '当前没有可用的支付方式', type: 'error' });
       return;
     }
+    if (!captchaChallenge || !captchaAnswer.trim()) {
+      showToast({ message: '请输入图片验证码', type: 'error' });
+      return;
+    }
 
     setSubmitting(true);
 
@@ -737,6 +839,10 @@ function CheckoutPage({
         payment: {
           provider: selectedPayment.provider,
           channel: selectedPayment.channel,
+        },
+        captcha: {
+          id: captchaChallenge.id,
+          answer: captchaAnswer,
         },
       });
       sessionStorage.setItem(LAST_CONTACT_STORAGE, contact.trim());
@@ -754,6 +860,7 @@ function CheckoutPage({
         message: err instanceof Error ? err.message : '创建订单失败',
         type: 'error',
       });
+      void refreshCaptcha();
     } finally {
       setSubmitting(false);
     }
@@ -802,6 +909,45 @@ function CheckoutPage({
         />
       </label>
 
+      <label className="block">
+        <span className="text-sm font-medium text-slate-700">验证码</span>
+        <div className="mt-2 flex flex-col gap-2 sm:flex-row sm:items-stretch">
+          <input
+            autoComplete="off"
+            className="h-11 min-w-0 flex-1 rounded-md border border-slate-300 px-3 text-sm uppercase outline-none focus:border-slate-900"
+            maxLength={5}
+            onChange={(event) => setCaptchaAnswer(event.target.value.toUpperCase())}
+            placeholder="请输入图片中的字符"
+            required
+            value={captchaAnswer}
+          />
+          <div className="flex h-[90px] items-center gap-2 sm:h-11">
+            <div className="flex h-[90px] w-[220px] items-center justify-center overflow-hidden rounded-md border border-slate-300 bg-slate-50 sm:h-11 sm:w-[132px]">
+              {captchaChallenge && !captchaLoading ? (
+                <img
+                  alt="下单验证码"
+                  className="h-full w-full object-fill"
+                  src={`data:image/png;base64,${captchaChallenge.image_base64}`}
+                />
+              ) : (
+                <span className="text-xs text-slate-500">{captchaLoading ? '加载中...' : '加载失败'}</span>
+              )}
+            </div>
+            <button
+              aria-label="刷新验证码"
+              className="inline-flex h-11 items-center justify-center gap-1 rounded-md border border-slate-300 px-3 text-sm text-slate-700 disabled:cursor-wait disabled:text-slate-400"
+              disabled={captchaLoading}
+              onClick={() => void refreshCaptcha()}
+              type="button"
+            >
+              <RefreshCcw className={captchaLoading ? 'animate-spin' : ''} size={16} />
+              刷新
+            </button>
+          </div>
+        </div>
+        {captchaError && <span className="mt-1 block text-sm text-red-600">{captchaError}</span>}
+      </label>
+
       <fieldset>
         <legend className="text-sm font-medium text-slate-700">支付方式</legend>
         <div className="mt-2 grid grid-cols-2 gap-2">
@@ -829,7 +975,7 @@ function CheckoutPage({
         </button>
         <button
           className="inline-flex h-10 items-center justify-center gap-2 rounded-md bg-slate-950 px-4 text-sm font-medium text-white disabled:cursor-wait disabled:bg-slate-400"
-          disabled={submitting || !selectedPayment || product.stock <= 0}
+          disabled={submitting || captchaLoading || !captchaChallenge || !selectedPayment || product.stock <= 0}
           type="submit"
         >
           <CreditCard size={18} />

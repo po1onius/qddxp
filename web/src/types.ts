@@ -1,6 +1,16 @@
 export type StorefrontConfig = {
   shop_name: string;
   logo_url: string;
+  announcement: string;
+};
+
+export type AnnouncementSettings = {
+  announcement: string;
+  updated_at: string;
+};
+
+export type UpdateAnnouncementInput = {
+  announcement: string;
 };
 
 export type Product = {
@@ -94,6 +104,18 @@ export type CreateOrderInput = {
   contact: string;
   order_password: string;
   payment: PaymentSelection;
+  captcha: CaptchaAnswer;
+};
+
+export type CaptchaAnswer = {
+  id: string;
+  answer: string;
+};
+
+export type CaptchaChallenge = {
+  id: string;
+  image_base64: string;
+  expires_in_seconds: number;
 };
 
 export type PaymentProvider = 'epay' | 'wechatpay';

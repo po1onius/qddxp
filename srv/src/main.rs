@@ -1,3 +1,4 @@
+mod captcha;
 mod config;
 mod db;
 mod domain;
@@ -11,6 +12,7 @@ mod security;
 use std::{net::SocketAddr, sync::Arc};
 
 use axum::extract::DefaultBodyLimit;
+use captcha::CaptchaService;
 use config::AppConfig;
 use db::pool::{DbPool, create_pool};
 use notifications::TelegramNotifier;
@@ -28,6 +30,7 @@ const ADMIN_SESSION_MAX_CAPACITY: u64 = 10_000;
 pub struct AppState {
     pub pool: DbPool,
     pub config: Arc<AppConfig>,
+    pub captcha: CaptchaService,
     pub wechatpay: Option<Arc<WechatPayClient>>,
     pub telegram: Option<Arc<TelegramNotifier>>,
 }
@@ -39,6 +42,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let _logging_guard = logging::init()?;
 
     let config = Arc::new(AppConfig::from_env()?);
+    let epay_active_channels = config
+        .epay
+        .as_ref()
+        .map(|epay| {
+            epay.active_channels
+                .iter()
+                .map(|channel| channel.as_ref())
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
     tracing::info!(
         listen_addr = %config.listen_addr,
         public_base_url = %config.public_base_url,
@@ -47,6 +60,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         shop_name = %config.shop_name,
         shop_logo_file = %config.shop_logo_file.display(),
         epay_configured = config.epay.is_some(),
+        epay_active_channels = ?epay_active_channels,
         wechatpay_configured = config.wechatpay.is_some(),
         telegram_notifications_configured = config.telegram.is_some(),
         rate_limit_trusted_proxy_cidrs = ?config.rate_limit_trusted_proxy_cidrs,
@@ -67,9 +81,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         .map(TelegramNotifier::from_config)
         .transpose()?
         .map(Arc::new);
+    let captcha = CaptchaService::new();
     let state = AppState {
         pool,
         config: Arc::clone(&config),
+        captcha,
         wechatpay,
         telegram,
     };

@@ -24,6 +24,8 @@ pub fn router(state: AppState) -> Router {
     let trusted_proxy_cidrs = &state.config.rate_limit_trusted_proxy_cidrs;
     let order_creation_limiter =
         rate_limit::FixedWindowRateLimiter::for_order_creation(trusted_proxy_cidrs);
+    let captcha_issue_limiter =
+        rate_limit::FixedWindowRateLimiter::for_captcha_issue(trusted_proxy_cidrs);
     let admin_login_limiter =
         rate_limit::FixedWindowRateLimiter::for_admin_login(trusted_proxy_cidrs);
 
@@ -46,6 +48,13 @@ pub fn router(state: AppState) -> Router {
         .route("/products", get(public::list_products))
         .route("/products/{id}", get(public::get_product))
         .route("/payment-methods", get(public::list_payment_methods))
+        .route(
+            "/captcha",
+            get(public::issue_captcha).layer(middleware::from_fn_with_state(
+                captcha_issue_limiter,
+                rate_limit::enforce_fixed_window_limit,
+            )),
+        )
         .route(
             "/orders",
             post(public::create_order).layer(middleware::from_fn_with_state(
@@ -75,6 +84,10 @@ pub fn router(state: AppState) -> Router {
         .route(
             "/admin/product-info",
             get(admin::list_product_info).post(admin::create_product_info),
+        )
+        .route(
+            "/admin/announcement",
+            get(admin::get_announcement_settings).patch(admin::update_announcement),
         )
         .route(
             "/admin/product-info/{id}/active",

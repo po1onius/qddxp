@@ -18,6 +18,8 @@ use serde_json::json;
 const X_FORWARDED_FOR: &str = "x-forwarded-for";
 const ORDER_CREATION_LIMIT_WINDOW: Duration = Duration::from_secs(3 * 60);
 const ORDER_CREATION_LIMIT_MAX_REQUESTS: u32 = 5;
+const CAPTCHA_ISSUE_LIMIT_WINDOW: Duration = Duration::from_secs(3 * 60);
+const CAPTCHA_ISSUE_LIMIT_MAX_REQUESTS: u32 = 20;
 const ADMIN_LOGIN_LIMIT_WINDOW: Duration = Duration::from_secs(60);
 const ADMIN_LOGIN_LIMIT_MAX_REQUESTS: u32 = 3;
 const CLEANUP_INTERVAL: Duration = Duration::from_secs(60);
@@ -44,6 +46,13 @@ const ADMIN_LOGIN_POLICY: RateLimitPolicy = RateLimitPolicy {
     error_message: "too many admin login requests",
 };
 
+const CAPTCHA_ISSUE_POLICY: RateLimitPolicy = RateLimitPolicy {
+    scope: "captcha_issue",
+    window: CAPTCHA_ISSUE_LIMIT_WINDOW,
+    max_requests: CAPTCHA_ISSUE_LIMIT_MAX_REQUESTS,
+    error_message: "too many CAPTCHA requests",
+};
+
 #[derive(Debug)]
 struct FixedWindow {
     started_at: Instant,
@@ -67,6 +76,10 @@ impl FixedWindowRateLimiter {
 
     pub fn for_admin_login(trusted_proxy_cidrs: &[IpNet]) -> Self {
         Self::new(trusted_proxy_cidrs, ADMIN_LOGIN_POLICY)
+    }
+
+    pub fn for_captcha_issue(trusted_proxy_cidrs: &[IpNet]) -> Self {
+        Self::new(trusted_proxy_cidrs, CAPTCHA_ISSUE_POLICY)
     }
 
     fn new(trusted_proxy_cidrs: &[IpNet], policy: RateLimitPolicy) -> Self {

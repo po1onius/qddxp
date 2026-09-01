@@ -1,5 +1,6 @@
 import type {
   AdminApiCallLog,
+  AnnouncementSettings,
   AdminInventoryProduct,
   AdminOrder,
   AdminProductInfo,
@@ -7,6 +8,7 @@ import type {
   CreateAdminProductResult,
   CreateOrderInput,
   CreateOrderResult,
+  CaptchaChallenge,
   CreateProductInfoInput,
   ListOrdersByContactInput,
   OffsetPageResponse,
@@ -22,6 +24,7 @@ import type {
   UpdateProductInfoActiveInput,
   UpdateOrderRemarkInput,
   UpdateOrderRemarkResult,
+  UpdateAnnouncementInput,
 } from '../types';
 
 const DEFAULT_API_BASE_URL = '/api';
@@ -112,6 +115,10 @@ export function listPaymentMethods(): Promise<PaymentMethod[]> {
   return request<PaymentMethod[]>('/payment-methods');
 }
 
+export function getCaptchaChallenge(): Promise<CaptchaChallenge> {
+  return request<CaptchaChallenge>('/captcha');
+}
+
 export function createOrder(input: CreateOrderInput): Promise<CreateOrderResult> {
   return request<CreateOrderResult>('/orders', {
     method: 'POST',
@@ -175,6 +182,17 @@ export function createProductInfo(input: CreateProductInfoInput): Promise<AdminP
 
 export function listAdminProductInfo(): Promise<AdminProductInfo[]> {
   return adminRequest<AdminProductInfo[]>('/admin/product-info');
+}
+
+export function getAdminAnnouncement(): Promise<AnnouncementSettings> {
+  return adminRequest<AnnouncementSettings>('/admin/announcement');
+}
+
+export function updateAdminAnnouncement(input: UpdateAnnouncementInput): Promise<AnnouncementSettings> {
+  return adminRequest<AnnouncementSettings>('/admin/announcement', {
+    method: 'PATCH',
+    body: JSON.stringify(input),
+  });
 }
 
 export function updateProductInfo(

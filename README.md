@@ -6,7 +6,9 @@
 
 **顾客端**
 - 商品列表浏览，实时展示各商品剩余库存与已售数量
+- 商城右上角公告入口，弹窗展示管理员维护的多行公告内容
 - 创建订单（须设置 6～50 个字符的订单密码）
+- 创建订单前必须通过一次性图片验证码，验证码 5 分钟过期且每次校验后立即失效
 - 按订单号 + 订单密码查询订单详情
 - 按联系方式查询历史订单列表
 - 易支付（epay）网关与微信支付官方 API v3 Native 在线支付，支付后自动分配卡密并展示
@@ -16,6 +18,7 @@
 - 库存（卡密）管理：批量导入、状态调整、筛选分页；每条发货内容至少 12 位，且仅显示开头 4 个字符
 - 订单管理：列表、状态跟踪、内部备注查看与修改；已分配的发货内容仅显示开头 4 个字符
 - 支付回调 API 调用日志查询，便于排查支付异常
+- 公告设置：编辑或清空商城公告，并查看最后更新时间
 
 **订单与库存**
 - 下单时必须预留真实库存；缺货时拒绝创建订单，不接受预购
@@ -244,7 +247,7 @@ docker compose -f deploy/compose.yml up -d pgbackrest-backup qddxp
 | `PGBR_SCHEDULE_HOUR_UTC` | 否 | pgBackRest 每日计划小时（UTC），默认 `3` |
 | `PGBR_CHECK_INTERVAL_SECONDS` | 否 | pgBackRest 调度检查间隔秒数，默认 `300` |
 | `WXPAY_EXPIRE_MINUTES` | 否 | 微信官方 Native 支付结束分钟数，默认 15，范围 1–120；ePay 固定为 3 分钟 |
-| `EPAY_GATEWAY` / `EPAY_PID` / `EPAY_KEY` | 否 | 三者都设置才启用易支付 |
+| `EPAY_GATEWAY` / `EPAY_PID` / `EPAY_KEY` / `EPAY_ACTIVE` | 否 | 四项同时设置才启用易支付；`EPAY_ACTIVE` 可为 `alipay`、`wxpay` 或 `alipay,wxpay`，仅向顾客展示选中的渠道 |
 | `WXPAY_APP_ID` / `WXPAY_MCH_ID` | 否 | 微信支付官方直连的应用 ID 与直连商户号 |
 | `WXPAY_MERCHANT_SERIAL_NO` | 否 | 商户 API 证书序列号 |
 | `WXPAY_MERCHANT_PRIVATE_KEY_FILE` | 否 | 商户 API 私钥 PEM 文件；Docker 部署时填写宿主机文件路径 |
@@ -264,8 +267,9 @@ docker compose -f deploy/compose.yml up -d pgbackrest-backup qddxp
 应用启动时会解析 Logo 内容并确认其为 SVG，而不是信任文件扩展名。
 
 创建订单接口 `POST /api/orders` 使用固定窗口，按客户端 IP 限制为每 3 分钟 5 次；
-第 6 次请求返回 `429`。管理员登录接口 `POST /api/admin/session` 按 IP 限制为
-每 1 分钟 3 次，第 4 次返回 `429`；两个接口的计数窗口相互独立，其他接口不参与应用层限流。
+第 6 次请求返回 `429`。验证码接口 `GET /api/captcha` 每 3 分钟最多请求 20 次；
+管理员登录接口 `POST /api/admin/session` 按 IP 限制为每 1 分钟 3 次，第 4 次返回
+`429`。三个接口的计数窗口相互独立，其他接口不参与应用层限流。
 直连部署根据 TCP 对端 IP 计数；
 部署在反向代理后时，需要将代理的精确地址（优先 `/32` 或 `/128`）配置到
 `RATE_LIMIT_TRUSTED_PROXY_CIDRS`，并让代理正确

@@ -2,6 +2,16 @@
 -- 并通过索引保障查询性能。业务层负责在事务中校验关联关系与维护一致性。
 CREATE EXTENSION IF NOT EXISTS pgcrypto;
 
+-- 商城公告属于运行时可编辑的站点设置。固定只允许 id=1 的单例记录，避免出现多条
+-- 公告后还需要额外定义优先级或当前生效记录；内容为空时商城明确展示“暂无公告”。
+CREATE TABLE storefront_settings (
+    id SMALLINT PRIMARY KEY DEFAULT 1 CHECK (id = 1),
+    announcement TEXT NOT NULL DEFAULT '' CHECK (char_length(announcement) <= 10000),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+INSERT INTO storefront_settings (id) VALUES (1);
+
 -- 商品定义保存面向顾客展示的稳定信息；实际可交付的卡密库存存放在 products 表。
 CREATE TABLE product_info (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),

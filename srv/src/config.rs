@@ -7,6 +7,8 @@ use std::{
 use ipnet::IpNet;
 use thiserror::Error;
 
+use crate::domain::PaymentChannel;
+
 #[derive(Debug, Clone)]
 pub struct AppConfig {
     pub listen_addr: SocketAddr,
@@ -33,6 +35,13 @@ pub struct EpayConfig {
     pub gateway: String,
     pub pid: String,
     pub key: String,
+    pub active_channels: Vec<PaymentChannel>,
+}
+
+impl EpayConfig {
+    pub fn supports(&self, channel: PaymentChannel) -> bool {
+        self.active_channels.contains(&channel)
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -85,6 +94,8 @@ pub enum ConfigError {
     },
     #[error("incomplete payment configuration: {0}")]
     IncompletePaymentConfig(&'static str),
+    #[error("invalid EPAY_ACTIVE: {0}; expected alipay, wxpay, or a comma-separated combination")]
+    InvalidEpayActive(String),
     #[error("PUBLIC_BASE_URL must use https when official WeChat Pay is enabled")]
     WechatPayRequiresHttps,
     #[error(
@@ -122,14 +133,12 @@ impl AppConfig {
             .filter(|minutes| (1..=120).contains(minutes))
             .ok_or(ConfigError::InvalidPositiveInteger("WXPAY_EXPIRE_MINUTES"))?;
 
-        let epay = match (
-            optional_nonempty("EPAY_GATEWAY"),
-            optional_nonempty("EPAY_PID"),
-            optional_nonempty("EPAY_KEY"),
-        ) {
-            (Some(gateway), Some(pid), Some(key)) => Some(EpayConfig { gateway, pid, key }),
-            _ => None,
-        };
+        let epay = epay_config_from_values(
+            env::var("EPAY_GATEWAY").ok(),
+            env::var("EPAY_PID").ok(),
+            env::var("EPAY_KEY").ok(),
+            env::var("EPAY_ACTIVE").ok(),
+        )?;
 
         // 固定的容器内密钥文件位置不应决定支付方是否启用；是否启用只由业务凭据判断。
         // 当五项业务凭据全部为空时忽略文件参数，使仅使用 ePay 的部署无需提供有效 PEM。
@@ -266,6 +275,47 @@ fn optional_nonempty_value(value: Option<String>) -> Option<String> {
     value
         .map(|value| value.trim().to_string())
         .filter(|value| !value.is_empty())
+}
+
+fn epay_config_from_values(
+    gateway: Option<String>,
+    pid: Option<String>,
+    key: Option<String>,
+    active: Option<String>,
+) -> Result<Option<EpayConfig>, ConfigError> {
+    match (
+        optional_nonempty_value(gateway),
+        optional_nonempty_value(pid),
+        optional_nonempty_value(key),
+        optional_nonempty_value(active),
+    ) {
+        (None, None, None, None) => Ok(None),
+        (Some(gateway), Some(pid), Some(key), Some(active)) => Ok(Some(EpayConfig {
+            gateway,
+            pid,
+            key,
+            active_channels: parse_epay_active(&active)?,
+        })),
+        _ => Err(ConfigError::IncompletePaymentConfig(
+            "EPAY_GATEWAY, EPAY_PID, EPAY_KEY, and EPAY_ACTIVE must be configured together",
+        )),
+    }
+}
+
+fn parse_epay_active(value: &str) -> Result<Vec<PaymentChannel>, ConfigError> {
+    let mut channels = Vec::new();
+    for name in value.split(',').map(str::trim) {
+        let channel = match name {
+            "alipay" => PaymentChannel::Alipay,
+            "wxpay" => PaymentChannel::Wxpay,
+            _ => return Err(ConfigError::InvalidEpayActive(value.to_string())),
+        };
+        if channels.contains(&channel) {
+            return Err(ConfigError::InvalidEpayActive(value.to_string()));
+        }
+        channels.push(channel);
+    }
+    Ok(channels)
 }
 
 fn telegram_config_from_values(

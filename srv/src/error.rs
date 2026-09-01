@@ -22,6 +22,8 @@ pub enum AppError {
     Pool(#[from] diesel_async::pooled_connection::bb8::RunError),
     #[error("session error")]
     Session(#[from] tower_sessions::session::Error),
+    #[error("CAPTCHA error")]
+    Captcha(#[from] crate::captcha::CaptchaError),
 }
 
 impl IntoResponse for AppError {
@@ -34,7 +36,7 @@ impl IntoResponse for AppError {
             Self::Database(diesel::result::Error::NotFound) => {
                 (StatusCode::NOT_FOUND, "resource not found".to_string())
             }
-            error @ (Self::Database(_) | Self::Pool(_) | Self::Session(_)) => {
+            error @ (Self::Database(_) | Self::Pool(_) | Self::Session(_) | Self::Captcha(_)) => {
                 tracing::error!(error = ?error, "internal error");
                 (
                     StatusCode::INTERNAL_SERVER_ERROR,

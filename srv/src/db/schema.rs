@@ -3,6 +3,17 @@ diesel::table! {
     use diesel::sql_types::*;
     use diesel::sql_types::Timestamptz;
 
+    storefront_settings (id) {
+        id -> Int2,
+        announcement -> Text,
+        updated_at -> Timestamptz,
+    }
+}
+
+diesel::table! {
+    use diesel::sql_types::*;
+    use diesel::sql_types::Timestamptz;
+
     api_call_logs (id) {
         id -> Uuid,
         api_name -> Text,
@@ -108,4 +119,5 @@ diesel::allow_tables_to_appear_in_same_query!(
     payment_events,
     product_info,
     products,
+    storefront_settings,
 );

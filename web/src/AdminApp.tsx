@@ -10,6 +10,7 @@ import {
   FileText,
   Loader2,
   LogOut,
+  Megaphone,
   PackagePlus,
   Pencil,
   Power,
@@ -28,6 +29,7 @@ import {
   ApiError,
   createAdminProduct,
   createProductInfo,
+  getAdminAnnouncement,
   getAdminSession,
   listAdminApiCallLogs,
   listAdminOrders,
@@ -38,11 +40,13 @@ import {
   logoutAdmin,
   updateAdminProductStatuses,
   updateAdminOrderRemark,
+  updateAdminAnnouncement,
   updateProductInfo,
   updateProductInfoActive,
 } from './api/client';
 import type {
   AdminApiCallLog,
+  AnnouncementSettings,
   AdminInventoryProduct,
   AdminOrder,
   AdminProductInfo,
@@ -59,6 +63,7 @@ const ADMIN_PAGE_SIZE = 20;
 const PRODUCT_INFO_PAGE_SIZE = 8;
 const MIN_PRODUCT_CONTENT_CHARS = 12;
 const MAX_ORDER_REMARK_CHARS = 1000;
+const MAX_ANNOUNCEMENT_CHARS = 10_000;
 
 const inputClass =
   'mt-2 h-10 w-full rounded-md border border-slate-300 bg-white px-3 text-sm outline-none focus:border-slate-950';
@@ -102,7 +107,7 @@ const emptyProductInfoForm: ProductInfoFormState = {
   imagePreviewUrl: '',
 };
 
-type AdminTab = 'product_info' | 'inventory' | 'orders' | 'logs';
+type AdminTab = 'product_info' | 'inventory' | 'orders' | 'announcement' | 'logs';
 
 type InventoryFilters = {
   productInfoId: string;
@@ -590,6 +595,12 @@ function AdminDashboard({
             />
           </div>
         )}
+
+        {activeTab === 'announcement' && (
+          <div className="mt-6">
+            <AnnouncementSettingsPanel />
+          </div>
+        )}
       </main>
     </div>
   );
@@ -600,6 +611,7 @@ function AdminNav({ activeTab, onChange }: { activeTab: AdminTab; onChange: (tab
     { icon: <Boxes size={18} />, id: 'product_info', label: '商品信息' },
     { icon: <PackagePlus size={18} />, id: 'inventory', label: '库存' },
     { icon: <ClipboardList size={18} />, id: 'orders', label: '订单' },
+    { icon: <Megaphone size={18} />, id: 'announcement', label: '公告设置' },
     { icon: <FileText size={18} />, id: 'logs', label: '日志' },
   ];
 
@@ -621,6 +633,126 @@ function AdminNav({ activeTab, onChange }: { activeTab: AdminTab; onChange: (tab
         </button>
       ))}
     </nav>
+  );
+}
+
+function AnnouncementSettingsPanel() {
+  const { showToast } = useToast();
+  const [announcement, setAnnouncement] = useState('');
+  const [savedSettings, setSavedSettings] = useState<AnnouncementSettings | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [saving, setSaving] = useState(false);
+
+  useEffect(() => {
+    let cancelled = false;
+    setLoading(true);
+    console.info('[公告设置] 正在加载公告');
+    void getAdminAnnouncement()
+      .then((settings) => {
+        if (cancelled) {
+          return;
+        }
+        setAnnouncement(settings.announcement);
+        setSavedSettings(settings);
+        console.info('[公告设置] 公告加载完成', {
+          announcementLength: Array.from(settings.announcement).length,
+          updatedAt: settings.updated_at,
+        });
+      })
+      .catch((error) => {
+        if (cancelled) {
+          return;
+        }
+        console.error('[公告设置] 公告加载失败', error);
+        showToast({
+          message: error instanceof Error ? error.message : '公告加载失败',
+          type: 'error',
+        });
+      })
+      .finally(() => {
+        if (!cancelled) {
+          setLoading(false);
+        }
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [showToast]);
+
+  async function saveAnnouncement(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    const announcementLength = Array.from(announcement.trim()).length;
+    if (announcementLength > MAX_ANNOUNCEMENT_CHARS) {
+      showToast({ message: `公告内容不能超过 ${MAX_ANNOUNCEMENT_CHARS} 个字符`, type: 'error' });
+      return;
+    }
+
+    setSaving(true);
+    console.info('[公告设置] 正在保存公告', {
+      announcementLength,
+      announcementEmpty: announcement.trim().length === 0,
+    });
+    try {
+      const settings = await updateAdminAnnouncement({ announcement });
+      setAnnouncement(settings.announcement);
+      setSavedSettings(settings);
+      console.info('[公告设置] 公告保存成功', {
+        announcementLength: Array.from(settings.announcement).length,
+        updatedAt: settings.updated_at,
+      });
+      showToast({ message: settings.announcement ? '公告已更新' : '公告已清空', type: 'success' });
+    } catch (error) {
+      console.error('[公告设置] 公告保存失败', error);
+      showToast({
+        message: error instanceof Error ? error.message : '公告保存失败',
+        type: 'error',
+      });
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  const announcementLength = Array.from(announcement).length;
+  const unchanged = savedSettings !== null && announcement === savedSettings.announcement;
+
+  return (
+    <section className="rounded-md border border-slate-200 bg-white p-5 shadow-panel">
+      <div className="flex flex-col gap-2 sm:flex-row sm:items-start sm:justify-between">
+        <div>
+          <h2 className="text-base font-semibold">商城公告</h2>
+          <p className="mt-1 text-sm text-slate-500">保存后，顾客可通过商城右上角的“公告”按钮查看。</p>
+        </div>
+        {savedSettings && (
+          <span className="text-xs text-slate-500">最后更新：{formatDate(savedSettings.updated_at)}</span>
+        )}
+      </div>
+      <form className="mt-5" onSubmit={(event) => void saveAnnouncement(event)}>
+        <label className="block">
+          <span className="text-sm font-medium text-slate-700">公告内容</span>
+          <textarea
+            className="mt-2 min-h-72 w-full rounded-md border border-slate-300 bg-white px-3 py-2 text-sm leading-6 outline-none focus:border-slate-950"
+            disabled={loading || saving}
+            maxLength={MAX_ANNOUNCEMENT_CHARS}
+            onChange={(event) => setAnnouncement(event.target.value)}
+            placeholder="输入商城公告；留空时顾客端显示“暂无公告”"
+            value={announcement}
+          />
+        </label>
+        <div className="mt-2 flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+          <span className={`text-xs ${announcementLength > MAX_ANNOUNCEMENT_CHARS ? 'text-red-600' : 'text-slate-500'}`}>
+            {announcementLength} / {MAX_ANNOUNCEMENT_CHARS} 字符
+          </span>
+          <button
+            className="inline-flex h-10 items-center justify-center gap-2 rounded-md bg-slate-950 px-4 text-sm font-medium text-white disabled:cursor-wait disabled:bg-slate-400"
+            disabled={loading || saving || !savedSettings || unchanged || announcementLength > MAX_ANNOUNCEMENT_CHARS}
+            type="submit"
+          >
+            {saving ? <Loader2 className="animate-spin" size={18} /> : <Save size={18} />}
+            {saving ? '保存中' : '保存公告'}
+          </button>
+        </div>
+      </form>
+    </section>
   );
 }
 

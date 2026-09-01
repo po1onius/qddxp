@@ -6,7 +6,18 @@ use uuid::Uuid;
 
 use crate::db::schema::{
     api_call_logs, orders, payment_attempts, payment_events, product_info, products,
+    storefront_settings,
 };
+
+pub const STOREFRONT_SETTINGS_ID: i16 = 1;
+
+#[derive(Debug, Clone, Queryable, Identifiable, Serialize)]
+#[diesel(table_name = storefront_settings)]
+pub struct StorefrontSettings {
+    pub id: i16,
+    pub announcement: String,
+    pub updated_at: DateTime<Utc>,
+}
 
 #[derive(Debug, Clone, Queryable, Identifiable, Serialize)]
 #[diesel(table_name = api_call_logs)]

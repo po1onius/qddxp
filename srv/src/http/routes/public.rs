@@ -13,9 +13,13 @@ use uuid::Uuid;
 use super::epay;
 use crate::{
     AppState,
+    captcha::CaptchaChallenge,
     db::{
-        models::{NewOrder, NewPaymentAttempt, Order, PaymentAttempt, ProductInfo},
-        schema::{orders, payment_attempts, product_info, products},
+        models::{
+            NewOrder, NewPaymentAttempt, Order, PaymentAttempt, ProductInfo,
+            STOREFRONT_SETTINGS_ID, StorefrontSettings,
+        },
+        schema::{orders, payment_attempts, product_info, products, storefront_settings},
     },
     domain::{
         OrderStatus, PaymentAttemptState, PaymentChannel, PaymentProvider, ProductStatus,
@@ -52,6 +56,7 @@ pub struct ProductListItem {
 pub struct StorefrontResponse {
     pub shop_name: String,
     pub logo_url: &'static str,
+    pub announcement: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -60,6 +65,13 @@ pub struct CreateOrderRequest {
     pub contact: String,
     pub order_password: String,
     pub payment: PaymentSelectionRequest,
+    pub captcha: CaptchaAnswerRequest,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct CaptchaAnswerRequest {
+    pub id: Uuid,
+    pub answer: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -139,12 +151,31 @@ pub struct OrderDetailResponse {
     pub content: Option<String>,
 }
 
-pub async fn get_storefront(State(state): State<AppState>) -> Json<StorefrontResponse> {
+pub async fn get_storefront(
+    State(state): State<AppState>,
+) -> Result<Json<StorefrontResponse>, AppError> {
     tracing::debug!(shop_name = %state.config.shop_name, "getting public storefront configuration");
-    Json(StorefrontResponse {
+    let mut conn = state.pool.get().await?;
+    let settings = storefront_settings::table
+        .find(STOREFRONT_SETTINGS_ID)
+        .first::<StorefrontSettings>(&mut conn)
+        .await?;
+    tracing::info!(
+        announcement_chars = settings.announcement.chars().count(),
+        announcement_empty = settings.announcement.is_empty(),
+        "public storefront configuration loaded"
+    );
+    Ok(Json(StorefrontResponse {
         shop_name: state.config.shop_name.clone(),
         logo_url: "/api/storefront/logo",
-    })
+        announcement: settings.announcement,
+    }))
+}
+
+pub async fn issue_captcha(
+    State(state): State<AppState>,
+) -> Result<Json<CaptchaChallenge>, AppError> {
+    Ok(Json(state.captcha.issue().await?))
 }
 
 pub async fn list_products(
@@ -250,19 +281,23 @@ pub async fn list_payment_methods(
     State(state): State<AppState>,
 ) -> Json<Vec<PaymentMethodResponse>> {
     let mut methods = Vec::new();
-    if state.config.epay.is_some() {
-        methods.push(PaymentMethodResponse {
-            provider: PaymentProvider::Epay.as_ref().to_string(),
-            channel: PaymentChannel::Alipay.as_ref().to_string(),
-            label: "支付宝（易支付）".to_string(),
-            action_type: "redirect".to_string(),
-        });
-        methods.push(PaymentMethodResponse {
-            provider: PaymentProvider::Epay.as_ref().to_string(),
-            channel: PaymentChannel::Wxpay.as_ref().to_string(),
-            label: "微信（易支付）".to_string(),
-            action_type: "redirect".to_string(),
-        });
+    if let Some(epay) = state.config.epay.as_ref() {
+        if epay.supports(PaymentChannel::Alipay) {
+            methods.push(PaymentMethodResponse {
+                provider: PaymentProvider::Epay.as_ref().to_string(),
+                channel: PaymentChannel::Alipay.as_ref().to_string(),
+                label: "支付宝（易支付）".to_string(),
+                action_type: "redirect".to_string(),
+            });
+        }
+        if epay.supports(PaymentChannel::Wxpay) {
+            methods.push(PaymentMethodResponse {
+                provider: PaymentProvider::Epay.as_ref().to_string(),
+                channel: PaymentChannel::Wxpay.as_ref().to_string(),
+                label: "微信（易支付）".to_string(),
+                action_type: "redirect".to_string(),
+            });
+        }
     }
     if state.wechatpay.is_some() {
         methods.push(PaymentMethodResponse {
@@ -321,6 +356,15 @@ pub async fn create_order(
     State(state): State<AppState>,
     Json(request): Json<CreateOrderRequest>,
 ) -> Result<Json<CreateOrderResponse>, AppError> {
+    if !state
+        .captcha
+        .verify_once(request.captcha.id, &request.captcha.answer)
+    {
+        return Err(AppError::BadRequest(
+            "验证码错误或已过期，请刷新后重试".to_string(),
+        ));
+    }
+
     let contact = request.contact.trim();
     let contact_len = contact.chars().count();
     if contact.is_empty() {
@@ -396,13 +440,22 @@ pub async fn create_order(
             "unsupported payment provider/channel combination".to_string(),
         ));
     }
-    let provider_configured = match payment_provider {
-        PaymentProvider::Epay => state.config.epay.is_some(),
+    let payment_method_enabled = match payment_provider {
+        PaymentProvider::Epay => state
+            .config
+            .epay
+            .as_ref()
+            .is_some_and(|epay| epay.supports(payment_channel)),
         PaymentProvider::Wechatpay => state.wechatpay.is_some(),
     };
-    if !provider_configured {
+    if !payment_method_enabled {
+        tracing::warn!(
+            payment_provider = payment_provider.as_ref(),
+            payment_channel = payment_channel.as_ref(),
+            "create order rejected: selected payment method is not enabled"
+        );
         return Err(AppError::BadRequest(
-            "selected payment provider is not configured".to_string(),
+            "selected payment method is not enabled".to_string(),
         ));
     }
 
