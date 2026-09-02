@@ -78,7 +78,6 @@ cd web && npm install && npm run dev
 `make` 只启动 `deploy/compose.yml` 中的 `db` 服务（不启动备份），项目名为 `qddxp-dev`，
 数据落在 `qddxp-dev_*` 命名卷中，与生产部署的 `deploy_*` 卷相互隔离。停止本地数据库：
 `podman stop qddxp-dev-postgres`（数据保留，下次 `make` 会自动重新启动）。
-```
 
 配置通过环境变量注入，开发默认值见 `Makefile`，完整变量见下表。
 
@@ -93,6 +92,19 @@ docker compose -f deploy/compose.yml up -d --build
 
 数据库同时将 5432 映射到宿主机回环地址（`POSTGRES_PORT` 可覆盖），便于宿主机上的
 排查与备份工具直连，也供本地开发（`make`）使用。
+
+Compose 默认桥接网络固定为 `172.30.250.0/24`，避免网络或容器重建后 Nginx 经宿主机
+映射端口访问应用时，应用看到的桥接网关地址发生变化。应用默认将这个固定网段作为
+可信代理 CIDR，并据此解析 `X-Forwarded-For`。应用不经过反向代理而直接对公网提供
+服务时，在 `.env` 中显式设置 `RATE_LIMIT_TRUSTED_PROXY_CIDRS=` 即可关闭代理信任。
+
+已有部署需要重建一次 Compose 网络才能应用新的 IPAM 配置；`down` 不会删除命名卷，
+不要附加 `-v`：
+
+```bash
+docker compose -f deploy/compose.yml down
+docker compose -f deploy/compose.yml up -d --build
+```
 
 ### 应用日志
 
@@ -242,7 +254,7 @@ docker compose -f deploy/compose.yml up -d pgbackrest-backup qddxp
 | `SHOP_NAME` | 是 | 店铺名称，1–100 个字符 |
 | `SHOP_LOGO_FILE` | 是 | SVG Logo 文件，启动时校验真实内容；Docker 部署时填写宿主机文件路径 |
 | `ORDER_PASSWORD_PEPPER` | 否 | 订单密码哈希 pepper，生产环境务必修改 |
-| `RATE_LIMIT_TRUSTED_PROXY_CIDRS` | 否 | 允许提供 `X-Forwarded-For` 的反向代理 CIDR，多个值用逗号分隔；直连部署留空 |
+| `RATE_LIMIT_TRUSTED_PROXY_CIDRS` | 否 | 允许提供 `X-Forwarded-For` 的反向代理 CIDR，默认使用 Compose 固定网段 `172.30.250.0/24`，多个值用逗号分隔；直连部署显式留空 |
 | `TELEGRAM_BOT_TOKEN` / `TELEGRAM_NOTIFY_CHAT_ID` | 否 | 两项同时设置后启用下单与付款单次通知；发送失败只记日志，不重试 |
 | `PGBR_SCHEDULE_HOUR_UTC` | 否 | pgBackRest 每日计划小时（UTC），默认 `3` |
 | `PGBR_CHECK_INTERVAL_SECONDS` | 否 | pgBackRest 调度检查间隔秒数，默认 `300` |

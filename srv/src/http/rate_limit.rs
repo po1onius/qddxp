@@ -185,9 +185,13 @@ impl TrustedClientIpExtractor {
     }
 
     fn is_trusted_proxy(&self, ip: IpAddr) -> bool {
+        self.matched_trusted_proxy_cidr(ip).is_some()
+    }
+
+    fn matched_trusted_proxy_cidr(&self, ip: IpAddr) -> Option<&IpNet> {
         self.trusted_proxy_cidrs
             .iter()
-            .any(|network| network.contains(&ip))
+            .find(|network| network.contains(&ip))
     }
 }
 
@@ -200,12 +204,20 @@ impl KeyExtractor for TrustedClientIpExtractor {
             .get::<ConnectInfo<SocketAddr>>()
             .map(|ConnectInfo(address)| address.ip())
             .ok_or(ExtractionError::MissingConnectInfo)?;
-        if !self.is_trusted_proxy(peer_ip) {
+        let Some(trusted_proxy_cidr) = self.matched_trusted_proxy_cidr(peer_ip) else {
+            tracing::debug!(
+                request_method = %parts.method,
+                request_path = parts.uri.path(),
+                %peer_ip,
+                trusted_proxy_matched = false,
+                rate_limit_ip = %peer_ip,
+                "rate-limit client IP resolved"
+            );
             return Ok(KeyOutcome {
                 key: peer_ip,
                 quota_override: None,
             });
-        }
+        };
 
         // X-Forwarded-For 从左到右记录客户端到代理链。只有当前一跳属于受信网段时才
         // 继续向左剥离，因此攻击者预置的伪造地址无法越过第一个非受信来源地址。
@@ -223,13 +235,25 @@ impl KeyExtractor for TrustedClientIpExtractor {
             }
         }
 
+        let forwarded_hop_count = forwarded_hops.len();
         let mut client_ip = peer_ip;
-        for hop in forwarded_hops.into_iter().rev() {
+        for hop in forwarded_hops.iter().rev().copied() {
             if !self.is_trusted_proxy(client_ip) {
                 break;
             }
             client_ip = hop;
         }
+
+        tracing::debug!(
+            request_method = %parts.method,
+            request_path = parts.uri.path(),
+            %peer_ip,
+            trusted_proxy_matched = true,
+            trusted_proxy_cidr = %trusted_proxy_cidr,
+            forwarded_hop_count,
+            rate_limit_ip = %client_ip,
+            "rate-limit client IP resolved"
+        );
 
         Ok(KeyOutcome {
             key: client_ip,

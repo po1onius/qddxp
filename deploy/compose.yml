@@ -110,7 +110,9 @@ services:
       SHOP_NAME: ${SHOP_NAME:?SHOP_NAME must be set}
       ADMIN_KEY: ${ADMIN_KEY:-change-me}
       ORDER_PASSWORD_PEPPER: ${ORDER_PASSWORD_PEPPER:-change-this-in-production}
-      RATE_LIMIT_TRUSTED_PROXY_CIDRS: ${RATE_LIMIT_TRUSTED_PROXY_CIDRS:-}
+      # 默认信任固定的 Compose 网段：Nginx 经宿主机映射端口转发时，应用看到的
+      # 对端通常是该桥接网络的网关。显式设置空值可关闭代理信任。
+      RATE_LIMIT_TRUSTED_PROXY_CIDRS: ${RATE_LIMIT_TRUSTED_PROXY_CIDRS-172.30.250.0/24}
       WXPAY_EXPIRE_MINUTES: ${WXPAY_EXPIRE_MINUTES:-15}
       RUST_LOG: ${RUST_LOG:-info}
       TELEGRAM_BOT_TOKEN: ${TELEGRAM_BOT_TOKEN:-}
@@ -158,3 +160,11 @@ volumes:
   qddxp_db_socket:
   qddxp_pgbackrest_lock:
   qddxp_pgbackrest_repository:
+
+networks:
+  default:
+    driver: bridge
+    ipam:
+      config:
+        # 固定网段可避免 Compose 重建网络后桥接网关地址漂移。
+        - subnet: 172.30.250.0/24
