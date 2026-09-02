@@ -34,10 +34,10 @@ use crate::{
 ///
 /// 应用层使用该常量返回清晰的业务错误，数据库迁移中的同值 CHECK 约束则负责阻止
 /// 绕过 HTTP 接口的无效写入。两层都按字符而不是 UTF-8 字节计算长度。
-const MIN_PRODUCT_CONTENT_CHARS: usize = 12;
+const MIN_PRODUCT_CONTENT_CHARS: usize = 4;
 
-/// 管理后台核对库存时允许看到的发货内容前缀字符数。
-const VISIBLE_PRODUCT_CONTENT_PREFIX_CHARS: usize = 4;
+/// 管理后台核对库存时允许看到的发货内容比例：总字符数除以该值并向下取整。
+const PRODUCT_CONTENT_VISIBLE_DIVISOR: usize = 3;
 
 /// 管理员订单备注允许保存的最大 Unicode 字符数。
 ///
@@ -172,15 +172,14 @@ pub struct UpdateOrderRemarkResponse {
     pub remark: String,
 }
 
-/// 管理后台只需要用发货内容开头四个字符辅助核对库存，不能把完整卡密返回给浏览器。
+/// 管理后台只展示发货内容开头三分之一的字符用于核对库存，不能把完整卡密返回给浏览器。
 ///
 /// 这里按 Unicode 字符而不是 UTF-8 字节截取，避免中文、emoji 等多字节内容在字符中间
-/// 被切断。固定使用四个星号表示已经隐藏的剩余部分，不暴露原始内容的准确长度。
+/// 被切断。可见字符数向下取整；最短内容为四个字符，因此至少会展示一个字符。固定使用
+/// 四个星号表示已经隐藏的剩余部分，不暴露原始内容的准确长度。
 fn mask_product_content(content: &str) -> String {
-    let visible_prefix = content
-        .chars()
-        .take(VISIBLE_PRODUCT_CONTENT_PREFIX_CHARS)
-        .collect::<String>();
+    let visible_chars = content.chars().count() / PRODUCT_CONTENT_VISIBLE_DIVISOR;
+    let visible_prefix = content.chars().take(visible_chars).collect::<String>();
     format!("{visible_prefix}****")
 }
 
